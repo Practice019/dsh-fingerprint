@@ -1,0 +1,6 @@
+# dsh-fingerprint bundle patch（W1 骨架）。
+# 该包被 profile 的 dsh.profile.bundles 引用后，这一层会被自动应用；
+# 对后面的 profile 层与用户 patch 层而言，本行按 id `fingerprint` 定位。
+- insert:
+    - id: fingerprint
+      name: dsh-fingerprint

@@ -1,0 +1,16 @@
+# 依赖与构建产物
+node_modules/
+
+# 开发期诊断产物（每次 runSmoke() 覆盖写，不入库）
+.smoke.json
+
+# 日志
+*.log
+
+# 本地备份（DSH 的组合/配置备份习惯用 .bak / .bak-*）
+*.bak
+*.bak-*
+
+# 操作系统杂项
+.DS_Store
+Thumbs.db

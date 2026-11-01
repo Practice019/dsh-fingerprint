@@ -1,0 +1,53 @@
+# ── 换行符：仓库内统一 LF ────────────────────────────────────────────────────
+# 为什么需要这一条：
+#   * Git for Windows 默认在 **system 级**设 core.autocrlf=true，会把检出到工作区的
+#     文本文件转成 CRLF。于是任何 Windows 贡献者"随便保存一下"就可能产生**整文件重写**
+#     的噪声 diff（真实的改动只有一行，diff 却是全文件）。
+#   * 本仓库全部是 JS / JSON / YAML / Markdown，没有任何内容依赖 CRLF。
+# `text=auto` 让 Git 自己判断哪些文件是文本；`eol=lf` 把**检出/工作区**换行符钉死为 LF。
+# （已被识别为二进制的文件不受 eol 影响 —— 见下面 binary 段落。）
+* text=auto eol=lf
+
+# ── Windows 批处理：必须保持 CRLF ────────────────────────────────────────────
+# cmd.exe 对 LF 结尾的 .bat/.cmd 容错很差：`if ... (`、`goto :label`、多行 `for` 等
+# 结构在 LF 下会出现"命令被吞掉""找不到标签"这类极难排查的失败。
+# 当前仓库没有这类文件，先写上规则，将来一旦新增就自动生效。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ── 图片 / 压缩包 / 可执行：禁止任何文本转换 ─────────────────────────────────
+# 标成 binary（等价于 -text -diff）：Git 不再尝试规范化换行，也不会把内容当文本
+# 塞进 diff。当前仓库没有这些类型 —— 这一组是给后人的保护性规则。
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.bmp  binary
+*.zip  binary
+*.gz   binary
+*.tgz  binary
+*.tar  binary
+*.7z   binary
+*.rar  binary
+*.pdf  binary
+*.exe  binary
+*.dll  binary
+*.node binary
+*.wasm binary
+*.bin  binary
+
+# ── SVG 例外：它是文本（XML），不能当 binary ─────────────────────────────────
+# 本仓库有图标资源是 SVG；标成 binary 会让它无法 diff / 无法按文本合并，
+# 所以显式声明为文本并统一 LF（覆盖上面的通配，避免后人误加 *.svg binary）。
+*.svg text eol=lf
+
+# ── 锁文件：文本、保留 LF（避免不同平台的安装产生换行噪声）───────────────────
+*.lock      text eol=lf
+*.lock.json text eol=lf
+
+# ── 明确让 Git 忽略本仓库的归档/备份类产物 ──────────────────────────────────
+# .smoke.json / *.bak* 已在 .gitignore 里忽略；这里额外声明它们的文本属性，
+# 以防有人 --force 加进来时产生 CRLF 噪声。
+.smoke.json text eol=lf
