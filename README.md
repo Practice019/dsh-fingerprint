@@ -2,7 +2,7 @@
 
 DSH Web UI 左侧栏的「**指纹检测**」面板：勾选你已配置的模型 → 设轮次 → 跑 LM Fingerpoint Detection（`lmfpd-sdk`）→ 得到模型排名表。
 
-**状态**：`tests: 137 passing` · `selfcheck: 28 checks` · `license: MIT` · 包版本 `0.1.0`
+**状态**：`tests: 137 passing` · `selfcheck: 29 checks` · `license: MIT` · 包版本 `0.1.0`
 
 ---
 
@@ -24,33 +24,68 @@ DSH Web UI 左侧栏的「**指纹检测**」面板：勾选你已配置的模�
 |---|---|
 | DSH 版本 | 见 `package.json` 的 `engines.dsh`：`>=0.2.1-rc.2 <0.3.0` |
 | Node.js | `>= 22`（见 `engines.node`） |
+| 依赖 | **克隆后必须先 `npm install`** —— 仓库**不含** `node_modules/`（见「安装」） |
 | 网络 | **首次运行**需下载约 **3.6 MB** 参考数据（缓存到 `%LOCALAPPDATA%\lmfpd\data.bin`） |
 | 账号 | 无要求 —— 用你自己已配好的模型 |
 
-### ⚠️ `engines.dsh` 的预发布陷阱（会影响你能否装上）
+### `engines.dsh` 的放行范围（以及末尾那个 `-0` 是干什么的）
 
-`engines.dsh = ">=0.2.1-rc.2 <0.3.0"` 的**实际放行范围**（真机 semver 实测）：
+当前值：**`engines.dsh = ">=0.2.1-rc.2 <0.3.0-0"`**（以 `package.json` 为准）。
+下表是用 **DSH 自己的判定函数**实测出来的
+（`@deepseek-ai/dsh-app-boot` 的 `evaluatePluginCompatibility(manifest, {}, version)`），
+**不是**普通 semver 工具的结论：
 
 | DSH 版本 | 放行？ |
 |---|---|
+| `0.2.0` | ✖ |
+| `0.2.1-rc.1` | ✖ |
+| `0.2.1-rc.2`（下界） | ✔ |
 | `0.2.1-rc.3`（写作时的当前版） | ✔ |
 | `0.2.1` | ✔ |
-| **`0.2.2-rc.1`（DSH 的下一个 RC）** | **✖ 会被 `pluginCompatibilityWarning` 明确 skip** |
-| `0.2.5-rc.1` | ✖ |
+| `0.2.2-rc.1` | ✔ |
+| `0.2.5-rc.1` | ✔ |
 | `0.2.9` | ✔ |
+| `0.3.0-rc.1` | ✖ |
 | `0.3.0` | ✖ |
+| `0.4.0-rc.1` | ✖ |
+| `1.0.0` | ✖ |
 
-**根因**：semver 规定「带预发布段的版本，只有在范围里存在**同 `[major,minor,patch]` 元组、且自身也带预发布段**的比较器时，才可能被满足」。
-`0.2.2-rc.1` 的元组是 `0.2.2`，而范围里只有 `0.2.1` 与 `0.3.0` 两个比较器 ⇒ 不被准入。
+**一句话**：**保留全部 `0.2.x`（含 `-rc`），完全拒绝 `0.3.x`（含它的 `-rc`）**。
 
-⇒ **单条 range 无法表达「任意 `0.2.x` 预发布」**（实测 4 种写法都不行，包括加 `||` 补下一个 RC、以及 `<0.3.0-0`）。
-⇒ 这是**生态共病**：同类插件用的也是同一个 range。
+#### 为什么末尾是 `<0.3.0-0` 而不是 `<0.3.0`？
 
-**我们的维护义务**：DSH 每发一个新 RC，本插件必须**同步更新 `engines.dsh`**。
-好消息是失败方式是**明确的 skip + 警告**，不是静默失败 —— 你会在启动输出里看到它。
+因为我们想要的语义是"**只用 `0.2.x` 这一代**"，而 `<0.3.0` **做不到这件事**：
 
-**逃生口（不想等我们更新时）**：DSH 自带按 `name@version` 加白名单的子命令。
-下面三条 usage 是**实测**出来的（触发其校验报错、让它自己打印 usage；**未执行任何有副作用的命令**）：
+> DSH 判定时带了 **`{ includePrerelease: true }`**
+> （`dsh-app-boot/lib/index.js:277`；`:303` 注释原文 *"Prereleases participate in ranges."*）。
+> 这个选项让**预发布版本像普通版本一样参与范围比较**。
+> 于是 `<0.3.0` 不仅放行 `0.2.9`，还会放行 **`0.3.0-rc.1`** —— 因为按 semver 的比较规则
+> `0.3.0-rc.1 < 0.3.0` 成立。
+
+| 上界写法 | `0.2.9` | `0.3.0-rc.1` | `0.3.0` |
+|---|---|---|---|
+| `<0.3.0`（**意图**是只用 0.2.x） | ✔ | **✔ ⚠️ 漏了** | ✖ |
+| `<0.3.0-0`（我们采用的） | ✔ | **✖** | ✖ |
+
+`-0` 是 semver 里"最小的预发布"标记：`<0.3.0-0` 表示"**连 `0.3.0` 的预发布也算超界**"。
+⇒ **`<0.3.0` 在最需要严的地方反而松**；`<0.3.0-0` 才是唯一"既保留全部 `0.2.x`、又彻底拒绝 `0.3.x`"的写法。
+
+> ⚠️ **顺带纠正一个容易搞反的点**：**预发布本身不是陷阱**。
+> 带 `includePrerelease` 时，`0.2.2-rc.1` / `0.2.5-rc.1` 这类运行时会**正常被放行** ——
+> 如果你用普通 semver 的**默认**选项去测，会得到"它们被拒绝"的相反答案。
+> **这正是必须调用 DSH 自己那份实现的原因**（见下）。
+
+> 📌 上表按**当前** `package.json` 里的 `engines.dsh` 值计算。**该值以 `package.json` 为准**；它一旦改动，请重算本表。
+> 重算的最省事办法：`node tools/selfcheck.mjs --judge-matrix --dsh-pkg <你的安装目录>/node_modules/@deepseek-ai/dsh/package.json`
+> —— 它会把"自研实现"与"DSH 自己的实现"逐格对比，不一致就点出来。
+
+### 什么时候才需要「版本豁免」
+
+**只有当 DSH 真的拒绝加载本插件时**（启动输出里出现 `skipping profile bundle "dsh-fingerprint"`
+或 `pluginCompatibilityWarning`）才考虑下面的豁免。**否则不要用** —— 原因见下面的风险提示。
+
+DSH 自带按 `name@version` 加白名单的子命令。下面三条 usage 是**实测**出来的
+（触发其校验报错、让它自己打印 usage；**未执行任何有副作用的命令**）：
 
 ```
 $ dsh plugin --profile desktop version-exemptions probe-extra-arg
@@ -76,6 +111,18 @@ dsh plugin --profile <profile> allow-version dsh-fingerprint@0.1.0 --dsh-version
 dsh plugin --profile <profile> revoke-version dsh-fingerprint@0.1.0 --dsh-version <你的DSH版本>
 ```
 
+> 🚨 **这个命令有真实风险，DSH 自己会警告你。** 执行 `allow-version … --accept-risk` 时它会打印：
+> ```
+> dsh: warning: allowing incompatible plugin versions can break the application or corrupt data.
+> Approval applies only to the exact package and DSH versions.
+> ```
+> （`dsh/lib/plugin-BiveYA7h.js:36`）而 `dsh-app-boot/lib/index.js:335` 的原文更重：
+> *"Running it may cause crashes or data loss."*
+>
+> ⇒ **不要把豁免当成常规安装步骤**。它只应在你**确实被 skip、并且明确接受这个风险**时使用。
+> 更稳妥的做法是等本插件更新 `engines.dsh`，或者到仓库里开个 issue。
+> ⚠️ **我们不应该为了绕过一个并不存在的问题，而让任何人去执行一个真有风险的动作。**
+
 ⚠️ 两点实测更正/提醒：
 1. **`revoke-version` 也需要 `--dsh-version`**（上面是命令自己打印的 usage 原文）。
 2. 豁免**精确到"包版本 + DSH 版本"这一对**：换插件版本或换 DSH 版本都**不继承**，要重新加。
@@ -87,6 +134,26 @@ dsh plugin --profile <profile> revoke-version dsh-fingerprint@0.1.0 --dsh-versio
 ## 安装
 
 > 下文的占位符：`<profile>` = 你的 profile 名（如 `desktop`、`web`）；`<DSH_HOME>` = DSH 的 home 目录（默认 `~/.dsh`，环境变量 `DSH_HOME` 可覆盖）；`<plugin-dir>` = 本仓库/插件所在目录。
+
+### ⚠️ 先装依赖（干净克隆必做）
+
+**本仓库不携带 `node_modules/`**（`.gitignore` 里有 `node_modules/`），所以**克隆下来必须先装依赖**，否则测试跑不起来：
+
+```powershell
+cd <plugin-dir>
+npm install          # 只装 1 个运行时依赖：lmfpd-sdk
+```
+
+| 命令 | 干净克隆（未 `npm install`） | 装了依赖后 |
+|---|---|---|
+| `node --test` | ❌ **会失败** —— `ERR_MODULE_NOT_FOUND: lmfpd-sdk` | ✅ 全绿 |
+| `node tools/selfcheck.mjs` | ✅ **可跑**（只 import Node 内置模块） | ✅ 可跑 |
+| `node tools/selfcheck.mjs --self-test` | ✅ **可跑**（零依赖） | ✅ 可跑 |
+| `node tools/client-smoke.mjs` | ✅ **可跑**（只 import Node 内置模块） | ✅ 可跑 |
+
+⇒ 也就是说：**静态自检、夹具自测、客户端冒烟这三个都是零依赖的，克隆下来立刻能跑**；只有单元/集成测试需要先 `npm install`。
+
+> ℹ️ 关于**方式 A**（下面的 `dsh plugin add`）：它是把参数直通给 pnpm 的，**pnpm 通常会顺带把依赖装上** —— 但**我没有实测证实这一点**（那要真的改一个 profile），所以这里**标注为"未证实"**。装完若 `node --test` 报 `lmfpd-sdk` 找不到，就在 `<plugin-dir>` 里手动 `npm install` 一次。
 
 ### 方式 A（推荐）：让 DSH 自己装
 
@@ -128,7 +195,8 @@ cmd /c mklink /J "<DSH_HOME>\profiles\<profile>\node_modules\dsh-fingerprint" ^
 #    "dsh": { "profile": { "bundles": [ ... , "dsh-fingerprint" ] } }
 ```
 
-⚠️ **本插件自己的依赖已随仓库携带**（`lmfpd-sdk` 在插件的 `node_modules/` 里），所以方式 B 不需要 profile 层再解析依赖。
+⚠️ **方式 B 与"依赖"是两件事**：方式 B 只是**挂载**（把目录链接进 profile），它**不会**替你装依赖 —— 所以**上面那条 `npm install` 一样要做**。
+（换句话说：方式 B 省掉的是"profile 层再解析一遍依赖"这件事，因为 `lmfpd-sdk` 已经装在**插件目录自己的** `node_modules/` 里了。）
 
 **为什么"进 bundles"和"有 `dsh.bundle.patch`"缺一不可：**
 
@@ -155,7 +223,7 @@ node tools/selfcheck.mjs --json      # 机器可读
 node tools/selfcheck.mjs --self-test # 夹具自测：证明各检查项既可达 PASS 也可达 FAIL
 ```
 
-它逐条校验 **28 项**（C1–C14 装载清单 + X1–X6 契约/发布附加 + S1–S7 槽位语义 + R1 回滚备件），覆盖：字段合规、`dsh.bundle.patch` 与 `dsh.client` 约束、`exports` 目标是否存在、insert 行 id/name、junction 是否指向正确目录、profile 依赖与 bundles、`client.js` 是否为 classic script、**每个 `require()` 实参是否都在 11 个外壳种子词白名单内**（防"require 了磁盘上不存在的包"）、**槽位注册字面量是否与契约一致**（panellist id、main key 一致性、order、label 形式与**实际中文值**、`module.exports.inject`）、以及**发布就绪性**（`engines.dsh` 覆盖运行时、`license`、无 `private`）。只读，不改任何文件。
+它逐条校验 **29 项**（C1–C14 装载清单 + X1–X7 契约/发布/私有标识附加 + S1–S7 槽位语义 + R1 回滚备件），覆盖：字段合规、`dsh.bundle.patch` 与 `dsh.client` 约束、`exports` 目标是否存在、insert 行 id/name、junction 是否指向正确目录、profile 依赖与 bundles、`client.js` 是否为 classic script、**每个 `require()` 实参是否都在 11 个外壳种子词白名单内**（防"require 了磁盘上不存在的包"）、**槽位注册字面量是否与契约一致**（panellist id、main key 一致性、order、label 形式与**实际中文值**、`module.exports.inject`）、**发布就绪性**（`engines.dsh` 覆盖运行时、`license`、无 `private`）、以及**私有标识残留**（`X7`：应入库文件里不含私有标识）。只读，不改任何文件。
 
 > 标记类检查（C10/C11/C12/C13/X3 + S1–S7）一律在**剥离注释后的代码视图**上判定：注释里出现 `window.__ModuleLoader__.load(` 或 `export function apply` 这类字样**不算命中**（早期版本会被注释骗过，报假 PASS）。
 >
@@ -278,7 +346,8 @@ node tools/selfcheck.mjs --json             # 汇总 JSON（含 pending 清单�
 node tools/selfcheck.mjs --self-test        # 夹具自测（证明各检查项能红能绿）
 node tools/selfcheck.mjs --plugin <目录> --profile-dir <profile 目录>   # 指定别处
 node tools/selfcheck.mjs --dsh-version <ver>                            # 指定 C7 的判定对象（CI / 手动复核）
-node tools/selfcheck.mjs --dsh-pkg <@deepseek-ai/dsh/package.json 路径>  # 指定动态读取源（非标准安装布局）
+node tools/selfcheck.mjs --dsh-pkg <@deepseek-ai/dsh/package.json 路径>  # 指定动态读取源 + DSH 判定引擎（非标准安装布局）
+node tools/selfcheck.mjs --judge-matrix                                 # 打印判定矩阵，核对自研实现 vs DSH 自己的实现
 ```
 
 - 退出码：有 `FAIL` → `1`；否则 `0`。参数缺失 → `2`。
@@ -286,18 +355,71 @@ node tools/selfcheck.mjs --dsh-pkg <@deepseek-ai/dsh/package.json 路径>  # 指
 - `SKIP` 用于"文件尚未就绪"，**不计 FAIL**，但会在汇总里单独列出为「待产出项」。
 - **严格只读**：不写任何文件、不改配置、不重启 DSH。
 
-**检查项清单（共 28 项）**
+**检查项清单（共 29 项）**
 
 | 组 | 编号 | 内容 |
 |---|---|---|
 | 装载清单 | C1–C14 | 字段合规 / `dsh.bundle.patch` / `dsh.client` 约束 / `exports` 目标 / insert 行 / **`engines.dsh` 覆盖运行时** / junction / profile 登记 / 客户端束四项 / 宿主入口 / 不装宿主包 |
 | 契约附加 | X1–X4 | `version`=0.1.0、`name`=dsh-fingerprint、仅 `lmfpd-sdk` 依赖、`client.js` 的 `inject` 存在 |
 | **发布就绪** | **X5–X6** | `license`=`MIT`、`private` 不为 `true` |
+| **私有标识残留** | **X7** | **应入库的文件里不含私有标识**（见下） |
 | 槽位语义（形式） | S1–S6 | panellist `id`、main `key` 一致性、`order`、`label` **形式**、`module.exports.inject`、存在 `name: "main"` 的页面注册 |
 | 槽位语义（值） | **S7** | `label` 的**实际中文值**是否等于冻结的「指纹检测」 |
 | 可回滚性 | R1 | profile 的 `package.json.bak-fingerprint` 是否存在且可解析（**现场判定，不在文档里写死**） |
 
-**C7 是发布语义**：本地开发时我们**刻意不声明** `engines.dsh`；发布则**必须声明**且覆盖运行时。判定过程会完整打印（解析出的 OR 组、每个比较子是否通过、预发布准入是否成立）。
+### X7：应入库的文件里不含私有标识
+
+**查什么**：插件目录下**应入库的文件**里不得出现冻结词表中的**私有标识** —— 本机绝对路径 / 本机用户名 / 私有环境变量名 / 私有 provider·产品族名。
+
+**两套判据同时跑**（防"工具漏"）：① 独立 token 正则（**决定 PASS/FAIL**）；② 裸子串 `includes`（交叉核对）。①漏掉、②找到的地方会作为**"第三种漏法"的探针**打印出来。三种写法都覆盖：引号包裹 / **裸键** / **URL 查询**。
+
+**排除集**（输出里会逐条打印理由）：
+| 排除 | 为什么 |
+|---|---|
+| `node_modules/` | 依赖目录：非本仓库作者所写，且被 `.gitignore` 忽略、不入库 |
+| `.git/` | 版本库内部结构：不是"应入库的文件" |
+| `.smoke.json` | 未被 git 跟踪 + 在 `.gitignore` 内 + 每次 `runSmoke()` 覆盖写的开发期产物（**里面必然含本机绝对路径**） |
+
+另排除二进制扩展名（`png` / `woff` / `asar` 等）。
+
+**刻意不算命中的三类**（否则一上线就误报）：
+1. **合成哨兵** —— 测试里的密钥"长成密钥的样子"是故意的（若出现在输出里测试即红）；
+2. **公开名** —— `deepseek-official` / `deepseek-account` / `deepseek-chat` / `openai` / `anthropic` / `DEEPSEEK_API_KEY` / `DEEPSEEK_ACCOUNT_API_KEY` / `DEEPSEEK_OFFICIAL_API_KEY` / `DSH_FINGERPRINT_*` / `@deepseek-ai/*` / `api.deepseek.com` / `127.0.0.1` / RFC1918·RFC5737 / `family:"deepseek"` / `familyName:"DeepSeek"`；
+3. **数字型证据** —— 端口 `2418`、order `40`、各类计数。
+
+### ⚠️ 给后人的两条说明（都是防误判的，别"修正"）
+
+**① 词表是"碎片拼接"存放的 —— `grep` 不到明文词条是故意的，不是词表丢了。**
+`tools/selfcheck.mjs` 里的词表与夹具输入写成 `needle('loo', 'm', 'y')` 这种**碎片拼接**，所以**文件里不存在任何完整词条**。
+原因：**X7 会扫描包括它自己在内的所有文件**。如果词表是明文，每次运行都会命中它自己，于是只剩两条坏路 —— 把该文件加进排除集（**等于给自己开后门**，正是"范围不足"的温床），或让检查永远红（**等于没有这项检查**）。碎片拼接让检查可以**在不给自己开豁免的前提下扫自己**。
+⇒ 代价：人肉 `grep` 找不到明文词条。**要确认词表内容请看契约 §49.1，不要以为它丢了。**
+
+**② 私有 provider 名的处理是"刻意的非对称"—— 不要"修正"成对称。**
+- **my**：**认**"引号里只有它自己"这种形态。
+- **test**：**只认**键名上下文与 URL 查询这两类。
+原因：**test** 单独出现在引号里、在测试代码中太常见（测试框架名、用例名），**认它会立刻误报并杀死这项检查** —— **误报比漏报更早杀死一项检查**。
+
+> 📌 上面这两个名字**故意不用反引号包起来**：**反引号包裹本身就是 X7 判定命中的形态之一**，包起来会让这份 README **自己**触发 X7。
+> 这不是排版疏忽 —— 实测过：写上去之后 `node tools/selfcheck.mjs` 立刻从 `PASS 29 / FAIL 0` 变成 `PASS 28 / FAIL 1`，报"私有名（引号/反引号包裹）2 处"。**文档自己也得是干净的。**
+
+**C7 是发布语义**：本地开发时我们**刻意不声明** `engines.dsh`；发布则**必须声明**且覆盖运行时。判定过程会完整打印（判定对象、判定引擎、每个比较子是否通过）。
+
+> 🚨 **C7 判定必须用 DSH 自己的实现，不能自己重写一遍。** 这一点是踩过坑的：
+> DSH 用的是 `semver.satisfies(version, range, { includePrerelease: true })`
+> （`dsh-app-boot/lib/index.js:277`），而**自研实现写成标准 semver 默认语义**时，
+> 会把 `0.2.2-rc.1` / `0.3.0-rc.1` 这类运行时**误判为 FAIL** —— 一个纯假阴性，
+> 而 DSH 正在发 rc 版，随时会踩到。
+>
+> 所以 C7 现在按下面的优先级取「判定引擎」，并**在输出里注明用的是哪一个**：
+>
+> | 优先级 | 引擎 | 输出里的标注 | 说明 |
+> |---|---|---|---|
+> | 1 | **DSH 自己的 `evaluatePluginCompatibility`** | `判定引擎 = DSH 自己的实现（evaluatePluginCompatibility）` | 直接 `import` 已装 DSH 的 `dsh-app-boot/lib/index.js`，**不可能与 DSH 语义不一致** |
+> | 2 | 自研 semver 实现（兜底） | `判定引擎 = 自研 semver 实现（兜底）` | 按 `includePrerelease` 语义实现，并**自曝"可能随 DSH 变动而失真"** |
+>
+> 想核对这两个引擎是否还一致 —— 跑 `node tools/selfcheck.mjs --judge-matrix`（加上 `--dsh-pkg` 指向你的安装目录）：
+> 它会把两个引擎在「12 个版本 × 14 种 range 写法 = 168 个组合」上**逐格对比**，不一致就点出来并让退出码非零。
+> 写作时的实测结果是 **不一致 0 处 ✔**。
 
 **C7 的判定对象（运行时 DSH 版本）按三级取值**，每次运行的输出里都会用「**来源：…**」注明实际用了哪一路：
 
@@ -331,12 +453,12 @@ en.nav 键存在 ✔（只核对键存在性，不校验英文值）
 
 **`--self-test` 是什么**：把合成输入喂给与真实检查**同一份**判定函数，断言每一项在"应红"的夹具上真的红、在基准夹具上真的绿。之所以需要它 —— 拿现成的第三方包做反例只能证明部分项能红（那个包在若干项上本来就合规），只有自造输入才能证明每一项都不是死代码。
 
-当前规模（**采样**）：三组共 **18 + 25 + 9 = 52 个夹具**、**126 + 84 + 21 = 231 个断言**（含证据断言与来源标签断言）：
+当前规模（**采样**）：三组共 **18 + 34 + 9 = 61 个夹具**、**126 + 115 + 21 = 262 个断言**（含证据断言与来源标签断言）：
 
 | 组 | 夹具 | 项 | 断言 |
 |---|---|---|---|
 | 槽位语义 S1–S7 | 18 | 7 | 126 |
-| 发布清单 C7 / X5 / X6（含三级取值各红各绿） | 25 | 3 | 75 状态 + 9 证据 |
+| 发布清单 C7 / X5 / X6（含三级取值各红各绿、A vs B 边界、引擎接入） | 34 | 3 | 102 状态 + 13 证据 |
 | C7 判定对象的三级取值解析器 | 9 | 2 | 18 状态 + 3 来源标签 |
 
 并逐项报告"可达 PASS / 可达 FAIL"，两项都必须为「是」。
@@ -345,32 +467,36 @@ en.nav 键存在 ✔（只核对键存在性，不校验英文值）
 
 ## 交付前必跑：四连
 
-改完插件（任何文件）后，**按顺序**跑这四条，全绿才算可交付：
+改完插件（任何文件）后，**按顺序**跑这四条。**注意每条的前置条件不同**（见下）：
 
 ```powershell
 cd <plugin-dir>
+npm install     # ← 前置：干净克隆先装依赖（否则 ④ 跑不起来；①②③ 零依赖、可先跑）
 
-# ① 装载自检：28 项逐条 PASS/FAIL/SKIP + 证据；有 FAIL → 退出码 1
+# ① 装载自检：29 项逐条 PASS/FAIL/SKIP + 证据；有 FAIL → 退出码 1
+#    ⚠️ 前置：插件必须**已装进 profile**（junction + profile 登记）——
+#       因为 C8 判 junction、R1 判回滚备件，**干净克隆上必然 FAIL**。
+#       只想看代码、没装 profile 的人请跳过 ①，跑 ②③④ 即可。
 node tools/selfcheck.mjs
 
-# ② 夹具自测：证明各检查项"可红可绿"、没有死代码
+# ② 夹具自测：零依赖、不碰 profile，任何环境都能跑
 node tools/selfcheck.mjs --self-test
 
-# ③ 客户端运行时冒烟：20 场景 × 2 模式 = 40 次运行
+# ③ 客户端运行时冒烟：20 场景 × 2 模式 = 40 次运行；零依赖、不碰 profile
 node tools/client-smoke.mjs
 
-# ④ 单元/集成测试全量
+# ④ 单元/集成测试全量：需要先 npm install
 node --test
 ```
 
 判定标准：
 
-| 步骤 | 通过条件 | 本轮实测（**采样，不是硬结论**） |
-|---|---|---|
-| ① | **`FAIL 0`**（`SKIP` 若出现，说明有文件尚未就绪，交付前必须变成 `PASS`） | `PASS 28 / FAIL 0 / SKIP 0`，退出码 0 |
-| ② | **`断言不符 0 处；不可达项 0 项`** | 183 断言，各项均可达 PASS 且可达 FAIL |
-| ③ | **`FAIL 0`**（**注意：不是"PASS 数固定"**，见下） | `PASS 679 / SKIP 5 / FAIL 0`，退出码 0 |
-| ④ | **`ℹ fail 0`**（判定标准就是 fail 0，条数会随增测变化） | `ℹ tests 137 / pass 137 / fail 0` |
+| 步骤 | 前置条件 | 通过条件 | 本轮实测（**采样，不是硬结论**） |
+|---|---|---|---|
+| ① | **插件已装进 profile**（干净克隆上 C8/R1 必然 FAIL） | **`FAIL 0`**（`SKIP` 若出现，说明有文件尚未就绪，交付前必须变成 `PASS`） | `PASS 29 / FAIL 0 / SKIP 0`，退出码 0 |
+| ② | **无**（零依赖、不碰 profile） | **`断言不符 0 处；不可达项 0 项`** | 262 断言，各项均可达 PASS 且可达 FAIL |
+| ③ | **无**（零依赖、不碰 profile） | **`FAIL 0`**（**注意：不是"PASS 数固定"**，见下） | `PASS 679 / SKIP 5 / FAIL 0`，退出码 0 |
+| ④ | **已 `npm install`** | **`ℹ fail 0`**（判定标准就是 fail 0，条数会随增测变化） | `ℹ tests 137 / pass 137 / fail 0` |
 
 > ⚠️ **③ 的判定标准是 `FAIL 0`，不要写死 PASS 条数**。它有两种模式，`PASS` 数会随模式不同而变：
 > - `primitives-present`：**SKIP 必须为 0**；
@@ -427,9 +553,9 @@ if (!hasPrimitives) check('probe absent-only', true);
 注入位置同上，给 `check` 与 `checkP` **两个入口**加上同一个"消失预算"，让 N 条断言在**两个模式下对称地不计数**：
 
 ```js
-const w4Mute = { left: 1 };                                          // 每个场景少 1 条
-function check(...)  { if (w4Mute.left > 0) { w4Mute.left -= 1; return; } /* …原逻辑… */ }
-function checkP(...) { if (w4Mute.left > 0) { w4Mute.left -= 1; return; } /* …原逻辑… */ }
+const muteBudget = { left: 1 };                                          // 每个场景少 1 条
+function check(...)  { if (muteBudget.left > 0) { muteBudget.left -= 1; return; } /* …原逻辑… */ }
+function checkP(...) { if (muteBudget.left > 0) { muteBudget.left -= 1; return; } /* …原逻辑… */ }
 ```
 
 - **原理**：两个模式**一起**变少 ⇒ 守恒不变式**仍然成立** ⇒ 只有"断言数下限"能发现。
@@ -511,12 +637,12 @@ if ($abs.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -an
 
 ## 文件与职责
 
-**完整清单 —— 插件目录下除 `node_modules/` 外的全部 25 个文件**：
+**完整清单 —— 仓库里被 git 跟踪的全部 25 个文件**（`node_modules/` 与开发期诊断产物不在其中）：
 
 | 职责 | 文件 |
 |---|---|
 | 清单 / 打包 / bundle 补丁 | `package.json` · `cordis.patch.yml` |
-| 许可证 / 忽略规则 | `LICENSE` · `.gitignore` |
+| 许可证 / 仓库属性 / 忽略规则 | `LICENSE` · `.gitattributes` · `.gitignore` |
 | 宿主 HTTP 服务（`/fingerprint/*` 全部路由） | `lib/index.js` |
 | 检测器封装（`lmfpd-sdk` 单例懒加载与状态） | `lib/detector.js` |
 | 采样层（挑战 / 取样 / 有效性判定） | `lib/probe.js` |
@@ -531,7 +657,15 @@ if ($abs.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -an
 | 单元 / 集成测试（7 份，`node --test` 全量 137 条） | `test/aggregate.test.mjs` · `test/detector.test.mjs` · `test/history.test.mjs` · `test/index.test.mjs` · `test/probe.test.mjs` · `test/send.test.mjs` · `test/targets.test.mjs` |
 | 设计文档 | `docs/DESIGN.md` |
 | 文档 | `README.md` |
-| 开发期诊断产物（**非交付物**） | `.smoke.json`（每次运行覆盖写；不进 `files`；自检刻意忽略） |
+
+**计数**：2 + 3 + 1×9（`lib/` 8 份 + `client.js`）+ 3（`tools/`）+ 7（`test/`）+ 1（`docs/`）+ 1（`README.md`）= **25** ✔
+
+> 与 `git ls-files` 对齐（取权威清单的方式：`git -C <plugin-dir> ls-files`，等价于
+> `gh api repos/Practice019/dsh-fingerprint/git/trees/main?recursive=1`）。
+>
+> ⚠️ **不在仓库里的两样东西**（所以**不要**在本表里找它们）：
+> - `node_modules/` —— `.gitignore` 忽略，需要 `npm install` 自己装；
+> - `.smoke.json` —— 开发期诊断产物，每次运行覆盖写，同样被忽略。**看到它存在于你的本地目录是正常的，但它不会被提交。**
 
 > 计数：2 + 2 + 1×8 + 4（tools）+ 7（test）+ 1（docs）+ 1（README）+ 1（`.smoke.json`）= **25** ✔
 >

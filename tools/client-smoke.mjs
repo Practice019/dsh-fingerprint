@@ -52,8 +52,8 @@ const MODES = ['primitives-present', 'primitives-absent'];
 
 const START_LABEL = '开始检测';
 const HISTORY_TAB_LABEL = '历史';
-const MODEL = 'loomy/DeepSeek-V4.1-Flash';
-const MODEL_KEY = 'my\u0000' + MODEL;
+const MODEL = 'example/text-image';
+const MODEL_KEY = 'provider_a\u0000' + MODEL;
 
 /**
  * 每个场景在 `primitives-present` 模式下**至少**应执行的断言条数（回归闸门用）。
@@ -501,13 +501,13 @@ async function runScenario(scenario, mode, src) {
 
   // ── fixtures ──────────────────────────────────────────────────────────────
   const providerA = {
-    provider: 'my',
-    displayName: 'my',
+    provider: 'provider_a',
+    displayName: 'provider_a',
     active: true,
     dormant: false,
     api: 'openai-completions',
     baseURL: 'http://x/v1',
-    credentialRef: 'MY_API_KEY',
+    credentialRef: 'PROVIDER_A_API_KEY',
     credentialRefSource: 'profile',
     credentialAvailable: true,
     error: null,
@@ -515,7 +515,7 @@ async function runScenario(scenario, mode, src) {
   };
   const providerB = { provider: 'deepseek-official', displayName: 'deepseek-official', active: true, dormant: false, api: 'openai-completions', baseURL: 'http://b/v1', credentialRef: 'DEEPSEEK_API_KEY', credentialRefSource: 'profile', credentialAvailable: true, error: null, models: [{ id: 'deepseek-chat', name: 'deepseek-chat', source: 'config', input: ['text'], contextWindow: null, maxTokens: null }] };
   const providerC = { provider: 'deepseek-account', displayName: 'deepseek-account', active: true, dormant: false, api: 'openai-completions', baseURL: 'http://c/v1', credentialRef: 'ACCOUNT_KEY', credentialRefSource: 'profile', credentialAvailable: true, error: null, models: [{ id: 'ds-acct', name: 'ds-acct', source: 'config', input: ['text'], contextWindow: 200000, maxTokens: 8192 }] };
-  const providerD = { provider: 'test', displayName: 'test', active: true, dormant: false, api: 'openai-completions', baseURL: 'http://d/v1', credentialRef: 'TEST_API_KEY', credentialRefSource: 'profile', credentialAvailable: false, error: null, models: [{ id: 'local/foo', name: 'local/foo', source: 'catalog', input: ['text'], contextWindow: null, maxTokens: null }] };
+  const providerD = { provider: 'provider_b', displayName: 'provider_b', active: true, dormant: false, api: 'openai-completions', baseURL: 'http://d/v1', credentialRef: 'PROVIDER_B_API_KEY', credentialRefSource: 'profile', credentialAvailable: false, error: null, models: [{ id: 'local/foo', name: 'local/foo', source: 'catalog', input: ['text'], contextWindow: null, maxTokens: null }] };
   const DORMANT = [];
   for (let i = 0; i < 41; i += 1) {
     const name = 'catalog-provider-' + String(i);
@@ -530,8 +530,8 @@ async function runScenario(scenario, mode, src) {
     finishedAt: null,
     options: { rounds: 3, count: 3, parallel: 3, strict: false, timeoutSec: 120, gapSec: 0 },
     error: null,
-    tasks: [{ provider: 'my', model: MODEL, round: 2, totalRounds: 3, state: 'streaming', count: 287, expectedCount: 300, firstByteMs: 412, error: null }],
-    results: [{ provider: 'my', model: MODEL, aggregate: { decision: 'partial', prediction: null, predictionName: null, family: null, familyName: null, validRounds: 2, totalRounds: 3, agreement: 0.5, confidence: null, stability: 'unstable', ranking: [{ model: MODEL, displayName: 'DeepSeek V4.1 Flash', family: 'deepseek', familyName: 'DeepSeek', score: 0.8, probability: 0.91, votes: 1, meanRank: 1 }], perRound: [{ index: 0, decision: 'scored', prediction: '', predictionName: '', probability: 0.91, error: null }] } }],
+    tasks: [{ provider: 'provider_a', model: MODEL, round: 2, totalRounds: 3, state: 'streaming', count: 287, expectedCount: 300, firstByteMs: 412, error: null }],
+    results: [{ provider: 'provider_a', model: MODEL, aggregate: { decision: 'partial', prediction: null, predictionName: null, family: null, familyName: null, validRounds: 2, totalRounds: 3, agreement: 0.5, confidence: null, stability: 'unstable', ranking: [{ model: MODEL, displayName: 'Example V1 Flash', family: 'deepseek', familyName: 'DeepSeek', score: 0.8, probability: 0.91, votes: 1, meanRank: 1 }], perRound: [{ index: 0, decision: 'scored', prediction: '', predictionName: '', probability: 0.91, error: null }] } }],
   };
   const runningSnapshot = {
     ok: true,
@@ -541,7 +541,7 @@ async function runScenario(scenario, mode, src) {
     finishedAt: null,
     options: { rounds: 3, count: 3, parallel: 3, strict: false, timeoutSec: 120, gapSec: 0 },
     error: null,
-    tasks: [{ provider: 'my', model: MODEL, round: 1, totalRounds: 3, state: 'streaming', count: 120, expectedCount: 300, firstByteMs: 412, error: null }],
+    tasks: [{ provider: 'provider_a', model: MODEL, round: 1, totalRounds: 3, state: 'streaming', count: 120, expectedCount: 300, firstByteMs: 412, error: null }],
     results: [],
   };
   const detector = { ready: true, builtAt: 'x', bankModelCount: 64 };
@@ -554,12 +554,12 @@ async function runScenario(scenario, mode, src) {
 
   // 历史场景 fixture
   const historyModels = [
-    { provider: 'my', model: MODEL, lastTs: '2026-11-02T06:30:00.000Z', runs: 3, lastDecision: 'scored', lastPrediction: 'deepseek-v4.1-flash-1017', lastPredictionName: 'DeepSeek V4.1 Flash', lastProbability: 0.9096, lastStability: 'stable' },
-    { provider: 'my', model: 'second/model', lastTs: null, runs: null, lastDecision: 'unscorable', lastPrediction: null, lastProbability: null, lastStability: null },
+    { provider: 'provider_a', model: MODEL, lastTs: '2026-11-02T06:30:00.000Z', runs: 3, lastDecision: 'scored', lastPrediction: 'example-v1-flash-0101', lastPredictionName: 'Example V1 Flash', lastProbability: 0.9096, lastStability: 'stable' },
+    { provider: 'provider_a', model: 'second/model', lastTs: null, runs: null, lastDecision: 'unscorable', lastPrediction: null, lastProbability: null, lastStability: null },
   ];
   const historyRecords = [
-    { v: 1, ts: '2026-11-02T06:30:00.000Z', runId: 'r-7', provider: 'my', model: MODEL, decision: 'scored', prediction: 'deepseek-v4.1-flash-1017', predictionName: 'DeepSeek V4.1 Flash', probability: 0.9096, agreement: 1, stability: 'stable', validRounds: 3, totalRounds: 3, error: null },
-    { v: 1, ts: '2026-11-02T05:10:00.000Z', runId: 'r-6', provider: 'my', model: MODEL, decision: 'partial', prediction: null, predictionName: null, probability: null, agreement: 0.5, stability: 'unstable', validRounds: 1, totalRounds: 3, error: 'No valid samples. This round cannot be scored.' },
+    { v: 1, ts: '2026-11-02T06:30:00.000Z', runId: 'r-7', provider: 'provider_a', model: MODEL, decision: 'scored', prediction: 'example-v1-flash-0101', predictionName: 'Example V1 Flash', probability: 0.9096, agreement: 1, stability: 'stable', validRounds: 3, totalRounds: 3, error: null },
+    { v: 1, ts: '2026-11-02T05:10:00.000Z', runId: 'r-6', provider: 'provider_a', model: MODEL, decision: 'partial', prediction: null, predictionName: null, probability: null, agreement: 0.5, stability: 'unstable', validRounds: 1, totalRounds: 3, error: 'No valid samples. This round cannot be scored.' },
   ];
   /**
    * W7 真机历史文件里的那一条（父任务「现成验收夹具」）：
@@ -570,8 +570,8 @@ async function runScenario(scenario, mode, src) {
     v: 1,
     ts: '2026-11-01T22:36:12.137Z',
     runId: 'r-1',
-    provider: 'my',
-    model: 'workbuddy/deepseek-v4.1-flash',
+    provider: 'provider_a',
+    model: 'acme/text-large',
     decision: 'unscorable',
     prediction: null,
     predictionName: null,
@@ -585,7 +585,7 @@ async function runScenario(scenario, mode, src) {
     options: { rounds: 1, count: 1, parallel: 1, strict: false },
     error: null,
   };
-  const realModelRow = { provider: 'my', model: 'workbuddy/deepseek-v4.1-flash', lastTs: realRecord.ts, runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive' };
+  const realModelRow = { provider: 'provider_a', model: 'acme/text-large', lastTs: realRecord.ts, runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive' };
 
   // §32.4 空洞 fixture：rounds[] 里夹 null / undefined；perRound[] 里夹 null 且缺 index
   const exportHoles = {
@@ -597,7 +597,7 @@ async function runScenario(scenario, mode, src) {
     options: {},
     targets: [
       {
-        provider: 'my',
+        provider: 'provider_a',
         model: MODEL,
         rounds: [
           { challenges: [], samples: [{ challengeId: 'c1', rawText: '111 222 HOLE-KEEP', text: 'x', state: 'complete', count: 300, expectedCount: 300, firstByteMs: 100, error: null }], analysis: {}, error: null },
@@ -616,8 +616,8 @@ async function runScenario(scenario, mode, src) {
           agreement: 0.5,
           confidence: null,
           stability: 'unstable',
-          ranking: [{ model: MODEL, displayName: 'DeepSeek V4.1 Flash', family: 'deepseek', familyName: 'DeepSeek', score: 0.5, probability: 0.9, votes: 1, meanRank: 1 }, null],
-          perRound: [{ index: 0, decision: 'scored', prediction: MODEL, predictionName: 'DeepSeek V4.1 Flash', probability: 0.9, error: null }, null, { decision: 'not_model', prediction: '', predictionName: '', probability: null, error: 'refusal' }],
+          ranking: [{ model: MODEL, displayName: 'Example V1 Flash', family: 'deepseek', familyName: 'DeepSeek', score: 0.5, probability: 0.9, votes: 1, meanRank: 1 }, null],
+          perRound: [{ index: 0, decision: 'scored', prediction: MODEL, predictionName: 'Example V1 Flash', probability: 0.9, error: null }, null, { decision: 'not_model', prediction: '', predictionName: '', probability: null, error: 'refusal' }],
         },
       },
     ],
@@ -630,8 +630,8 @@ async function runScenario(scenario, mode, src) {
     finishedAt: 1762000100000,
     options: { rounds: 4, count: 3, parallel: 3, strict: false, timeoutSec: 120, gapSec: 0 },
     error: null,
-    tasks: [{ provider: 'my', model: MODEL, round: 1, totalRounds: 4, state: 'complete', count: 300, expectedCount: 300, firstByteMs: 412, error: null }, null],
-    results: [{ provider: 'my', model: MODEL, aggregate: exportHoles.targets[0].aggregate }, null],
+    tasks: [{ provider: 'provider_a', model: MODEL, round: 1, totalRounds: 4, state: 'complete', count: 300, expectedCount: 300, firstByteMs: 412, error: null }, null],
+    results: [{ provider: 'provider_a', model: MODEL, aggregate: exportHoles.targets[0].aggregate }, null],
   };
 
   // ── 路由与种子（按场景）────────────────────────────────────────────────────
@@ -887,7 +887,7 @@ async function runScenario(scenario, mode, src) {
       check('9) 明细拉取 /history?limit=20&provider=&model=', fetchLog.some((entry) => entry.path.startsWith('/fingerprint/history?limit=20')));
       check(
         '9) 明细行渲染（时间/decision/top1/置信度/一致率/有效回合）',
-        t3.includes('DeepSeek V4.1 Flash') && t3.includes('已评分') && t3.includes('3 / 3'),
+        t3.includes('Example V1 Flash') && t3.includes('已评分') && t3.includes('3 / 3'),
         JSON.stringify({ len: t3.length, loading: t3.includes('明细加载中'), empty: t3.includes('该模型暂无明细记录'), recent: t3.includes('最近 2 条'), scored: t3.includes('已评分'), threeThree: t3.includes('3 / 3'), tail: t3.slice(-200) }),
       );
       const clearButton = findButton(afterDetail.out, '清空历史');
@@ -935,7 +935,7 @@ async function runScenario(scenario, mode, src) {
     switchTab(mounted.out, HISTORY_TAB_LABEL);
     const after = await flush(panelComp);
     const t2 = after.out.texts.join('\n');
-    check('13) 真机夹具：模型行渲染', t2.includes('workbuddy/deepseek-v4.1-flash'));
+    check('13) 真机夹具：模型行渲染', t2.includes('acme/text-large'));
     check('13) stability=inconclusive → 「样本不足，建议增加轮次」', t2.includes('样本不足，建议增加轮次'));
     check('13) null 全渲染成 —（无字面量 undefined / 0）', t2.includes('—') && t2.indexOf('undefined') === -1);
     const detailButton = findButton(after.out, '展开明细');

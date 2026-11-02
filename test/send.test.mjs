@@ -49,7 +49,7 @@ const delta = (text) => ({ type: 'text-delta', text });
 const reasoning = (text) => ({ type: 'reasoning-delta', text });
 const finish = (reason) => ({ type: 'finish', reason });
 
-const BASE_INPUT = { provider: 'my', model: 'loomy/DeepSeek-V4.1-Flash', prompt: 'count 1..300' };
+const BASE_INPUT = { provider: 'provider_a', model: 'example/text-image', prompt: 'count 1..300' };
 
 // ── 1) 五值映射 ─────────────────────────────────────────────────────────────
 
@@ -208,8 +208,8 @@ test('sendViaLlm：messages 用 RequestUserInput 形式，且 provider/model 原
   const ctx = makeCtx([delta('1'), finish({ kind: 'stop' })]);
   await sendViaLlm(ctx, { ...BASE_INPUT, temperature: 0.7, maxTokens: 4096, reasoningEffort: 'off' });
   const options = ctx.calls[0];
-  assert.equal(options.provider, 'my');
-  assert.equal(options.model, 'loomy/DeepSeek-V4.1-Flash');
+  assert.equal(options.provider, 'provider_a');
+  assert.equal(options.model, 'example/text-image');
   assert.equal(options.temperature, 0.7);
   assert.equal(options.maxTokens, 4096);
   assert.equal(options.reasoningEffort, 'off');
@@ -242,5 +242,5 @@ test('finishObservations：记录 finish.reason 的真实键集合（用于核�
   assert.deepEqual(last.rawKeys.sort(), ['extraField', 'kind']);
   assert.equal(last.kind, 'stop');
   assert.equal(last.endReason, 'stop');
-  assert.equal(last.provider, 'my');
+  assert.equal(last.provider, 'provider_a');
 });

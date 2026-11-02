@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dsh-fingerprint 装载自检（selfcheck）—— W4 产出物
+ * dsh-fingerprint 装载自检（selfcheck）—— 本仓库自带的校验工具
  *
  * 职责：作为**独立裁判**校验 dsh-fingerprint 的"可装载性"。
  * 不实现任何插件功能，不修改任何被检查文件（纯只读），不重启 DSH。
@@ -18,8 +18,8 @@
 
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // ─────────────────────────── 契约常量（冻结） ───────────────────────────
 
@@ -92,6 +92,8 @@ function parseArgs(argv) {
     profileDir: resolve(process.env.DSH_HOME || join(homedir(), '.dsh'), 'profiles', 'desktop'),
     json: false,
     selftest: false,
+    /** 打印判定矩阵（核对"自研实现"与"DSH 实现"是否一致）。 */
+    judgeMatrix: false,
     /** C7 判定对象的显式覆盖（最高优先级）。 */
     dshVersion: null,
     /** 额外指定一个 `@deepseek-ai/dsh/package.json` 路径（给非标准安装布局 / CI 用）。 */
@@ -101,6 +103,7 @@ function parseArgs(argv) {
     const token = argv[i]
     if (token === '--json') options.json = true
     else if (token === '--self-test') options.selftest = true
+    else if (token === '--judge-matrix') options.judgeMatrix = true
     else if (token === '--plugin' || token === '--profile-dir' || token === '--dsh-version' || token === '--dsh-pkg') {
       const value = argv[i += 1]
       if (typeof value !== 'string' || value.trim() === '') {
@@ -118,6 +121,7 @@ function parseArgs(argv) {
           '',
           '  --json                        汇总 JSON（含 pending 清单）',
           '  --self-test                   只跑夹具自测（证明各检查项能红能绿）',
+          '  --judge-matrix                打印判定矩阵：自研实现 vs DSH 自己的实现（核对是否一致）',
           '  --plugin <插件目录>            默认 = 本脚本的上一级',
           '  --profile-dir <profile 目录>   默认 = $DSH_HOME/profiles/desktop',
           '  --dsh-version <ver>           C7 判定对象的显式覆盖（最高优先级；给 CI / 手动指定用）',
@@ -127,6 +131,13 @@ function parseArgs(argv) {
           '',
           'C7 的判定对象（运行时 DSH 版本）按三级取值：--dsh-version > 动态读取 > 回落常量。',
           '输出里的「来源：…」会注明实际用了哪一路。',
+          '',
+          'X7（本仓库不含私有标识）：按契约 §49.1 的冻结词表扫描插件目录下**应入库的文件**，',
+          '用两套判据（独立 token 正则 + 裸子串 includes）交叉核对，不一致处会作为"形态漏"探针列出。',
+          '  排除集（会在输出里逐条打印理由）：node_modules/ · .git/ · .smoke.json（未跟踪、被 .gitignore 忽略、',
+          '  每次 runSmoke() 覆盖写）· 以及 png/woff/asar 等二进制扩展名。',
+          '  刻意不算命中的有：测试里的合成哨兵（故意长成密钥样）、各类公开名（deepseek-official / openai /',
+          '  DEEPSEEK_API_KEY / @deepseek-ai/* / 127.0.0.1 / RFC1918 等）、以及数字型证据。',
           '',
         ].join('\n'),
       )
@@ -144,6 +155,11 @@ const PROFILE_MANIFEST = join(PROFILE_DIR, 'package.json')
 const LINK_PATH = join(PROFILE_DIR, 'node_modules', PKG_NAME)
 /** C7 三级取值的结果（`--self-test` 只用夹具自带的 runtime，不读这里）。 */
 const RUNTIME = resolveRuntimeVersion({ explicit: ARGS.dshVersion, extraPackagePath: ARGS.dshPkg })
+/**
+ * C7 的判定引擎：**优先 DSH 自己的 `evaluatePluginCompatibility`**，读不到才回落自研实现。
+ * 顶层 await 是合法的（本文件是 ESM）。
+ */
+const JUDGE = await resolveJudgeEngine({ extraPackagePath: ARGS.dshPkg })
 const MANIFEST_TITLES = manifestTitles(RUNTIME.version)
 
 // ─────────────────────────── 输出与结果收集 ───────────────────────────
@@ -1136,7 +1152,17 @@ function sameTuple(left, right) {
   return left.major === right.major && left.minor === right.minor && left.patch === right.patch
 }
 
-/** 把单个比较子展开成 [{op, ver}]；非法返回 null。 */
+/**
+ * 把单个比较子展开成 [{op, ver}]；非法返回 null。
+ *
+ * ⚠️ **由 `^` / `~` / X-range（`0.2.x`、省略段）隐式生成的上界必须带 `-0`**
+ * （即 `<0.3.0-0`，而不是 `<0.3.0`）。这是 semver 的实际行为：`includePrerelease` 让
+ * **显式**写的比较子接纳预发布，但**展开出来的**上界会加 `-0` 把下一代的预发布挡在外面。
+ * 早期版本这里写的是 `pre: null`，于是 `^0.2.1-rc.2` / `~0.2.1-rc.2` / `0.2.x`
+ * 都会错误地放行 `0.3.0-rc.1` —— 由 `--judge-matrix` 与 DSH 逐格比对抓出来的（3 处漂移）。
+ * @param {string} token 单个比较子
+ * @returns {Array<{op:string, ver:object}>|null}
+ */
 function parseComparator(token) {
   const match = /^(\^|~|>=|<=|>|<|=)?v?(.+)$/u.exec(token)
   if (match === null) return null
@@ -1144,28 +1170,24 @@ function parseComparator(token) {
   const version = parseSemver(match[2])
   if (version === null) return null
   const plainRange = (base, upper) => [{ op: '>=', ver: base }, { op: '<', ver: upper }]
+  /** 隐式上界：带 `-0`，用于挡掉下一代的预发布。 */
+  const upperBound = (major, minor, patch) => ({ major, minor, patch, pre: ['0'] })
   // 通配 / 省略段 → X-range
   if (version.wildMinor || (!version.hasMinor && (op === '' || op === '='))) {
-    return plainRange(
-      { ...version, minor: 0, patch: 0, pre: null },
-      { major: version.major + 1, minor: 0, patch: 0, pre: null },
-    )
+    return plainRange({ ...version, minor: 0, patch: 0, pre: null }, upperBound(version.major + 1, 0, 0))
   }
   if (version.wildPatch || (!version.hasPatch && (op === '' || op === '='))) {
-    return plainRange(
-      { ...version, patch: 0, pre: null },
-      { major: version.major, minor: version.minor + 1, patch: 0, pre: null },
-    )
+    return plainRange({ ...version, patch: 0, pre: null }, upperBound(version.major, version.minor + 1, 0))
   }
   if (op === '^') {
     let upper
-    if (version.major > 0) upper = { major: version.major + 1, minor: 0, patch: 0, pre: null }
-    else if (version.minor > 0) upper = { major: 0, minor: version.minor + 1, patch: 0, pre: null }
-    else upper = { major: 0, minor: 0, patch: version.patch + 1, pre: null }
+    if (version.major > 0) upper = upperBound(version.major + 1, 0, 0)
+    else if (version.minor > 0) upper = upperBound(0, version.minor + 1, 0)
+    else upper = upperBound(0, 0, version.patch + 1)
     return plainRange(version, upper)
   }
   if (op === '~') {
-    return plainRange(version, { major: version.major, minor: version.minor + 1, patch: 0, pre: null })
+    return plainRange(version, upperBound(version.major, version.minor + 1, 0))
   }
   return [{ op: op === '' ? '=' : op, ver: version }]
 }
@@ -1199,37 +1221,512 @@ function testComparator(version, comparator) {
 }
 
 /**
- * 判断 `version` 是否满足 `range`（npm 语义，含**预发布准入规则**）。
- * 预发布准入：若 version 带预发布段，则组内**必须**存在一个比较子，其主次修订号元组与 version 相同**且**也带预发布段。
- * （这条很关键：`>=0.2.0` 不接受 `0.2.1-rc.3`，而 `>=0.2.1-rc.2 <0.3.0` 接受它。）
+ * 判断 `version` 是否满足 `range`。
+ *
+ * ⚠️ **默认 `includePrerelease: true` —— 这是为了与 DSH 对齐，不是随手选的默认值。**
+ * DSH 判插件兼容性用的是 `semver.satisfies(runtimeVersion, range, { includePrerelease: true })`
+ * （`dsh-app-boot/lib/index.js:277`；`:303` 注释原文 *"Prereleases participate in ranges."*）。
+ * 带上这个选项后，**预发布版本像普通版本一样参与范围比较** ——
+ * 标准 semver 的"预发布准入规则"（npm 默认语义）在这里**不生效**。
+ *
+ * 📛 **教训**：本函数早期实现的是那条准入规则（= `satisfies` 不带 options 的语义），
+ * 于是把 `0.2.2-rc.1` / `0.2.5-rc.1` / `0.3.0-rc.1` 这类运行时**误判为 FAIL** ——
+ * 一个纯假阴性，而 DSH 当前正在发 rc 版，随时会踩到。
+ * 现在：① 本函数改为 DSH 同语义；② **优先直接调用 DSH 自己的实现**（见 `resolveJudgeEngine`），
+ * 本函数只作为"读不到 DSH"时的兜底，且会在输出里明确标注它是自研等价实现。
  * @returns {{ok:boolean, reason:string, groups:Array|null}}
  */
-function satisfiesRange(versionText, rangeText) {
+function satisfiesRange(versionText, rangeText, options = {}) {
+  const includePrerelease = options.includePrerelease !== false
   const version = parseSemver(versionText)
   const groups = parseRange(rangeText)
   if (version === null) return { ok: false, reason: `运行时版本 ${JSON.stringify(versionText)} 自身非法`, groups: null }
   if (groups === null) return { ok: false, reason: `range ${JSON.stringify(rangeText)} 不是合法 semver range`, groups: null }
+  const label = (comparator) =>
+    `${comparator.op}${comparator.ver.major}.${comparator.ver.minor}.${comparator.ver.patch}${comparator.ver.pre === null ? '' : '-' + comparator.ver.pre.join('.')}`
   const tried = []
   for (const comparators of groups) {
     const failed = comparators.filter((comparator) => !testComparator(version, comparator))
-    const text = comparators.map((comparator) => `${comparator.op}${comparator.ver.major}.${comparator.ver.minor}.${comparator.ver.patch}${comparator.ver.pre === null ? '' : '-' + comparator.ver.pre.join('.')}`).join(' ')
+    const text = comparators.map(label).join(' ')
     if (failed.length > 0) {
-      tried.push(`组 [${text}] 不满足：${failed.map((comparator) => `${comparator.op}${comparator.ver.major}.${comparator.ver.minor}.${comparator.ver.patch}${comparator.ver.pre === null ? '' : '-' + comparator.ver.pre.join('.')}`).join(', ')} 未通过`)
+      tried.push(`组 [${text}] 不满足：${failed.map(label).join(', ')} 未通过`)
       continue
     }
-    if (version.pre !== null) {
+    if (!includePrerelease && version.pre !== null) {
       const admitted = comparators.some((comparator) => comparator.ver.pre !== null && sameTuple(comparator.ver, version))
       if (!admitted) {
-        tried.push(`组 [${text}] 数值上通过，但**预发布准入**失败：组内没有一个比较子同时满足「元组相同 + 带预发布段」（version 带预发布段）`)
+        tried.push(`组 [${text}] 数值上通过，但**预发布准入**失败（includePrerelease=false 语义）`)
         continue
       }
-      tried.push(`组 [${text}] 通过，且预发布准入成立 ✔`)
-    } else {
-      tried.push(`组 [${text}] 通过 ✔`)
     }
+    tried.push(
+      version.pre === null
+        ? `组 [${text}] 通过 ✔`
+        : `组 [${text}] 通过 ✔（includePrerelease 语义：预发布照常参与比较）`,
+    )
     return { ok: true, reason: tried.join('；'), groups }
   }
   return { ok: false, reason: tried.join('；'), groups }
+}
+
+// ═════════ X7：私有标识残留（§49.1 词表，冻结）—— 本项的唯一实现 ═════════
+//
+// 为什么要有这一项：本轮「范围不足」失败了**四次**（报单驱动 → 只扫 test/*.mjs →
+// 只按形态枚举 → 漏 URL 查询形态）。它是唯一一件"失败四次还在靠人手动兜"的事。
+// 做成自检项，才能不失败第五次。
+
+/**
+ * 把词条碎片拼成完整词条。
+ *
+ * ⚠️ **为什么词表不能以明文写在本文件里**：本检查会扫描**包括自己**在内的所有文件。
+ * 若词表是明文，每次运行都会命中本文件，于是只剩两条坏路：
+ *   ① 把本文件加进排除集 —— 等于给自己开后门，正是"范围不足"的温床；
+ *   ② 让检查永远红 —— 等于没有这项检查。
+ * 用碎片拼接之后，本文件里**不存在**任何完整词条，检查就能正大光明地扫自己。
+ * （夹具的"输入样本"同理：它们必须含这些词条才能测出检测有效，所以也用拼接。）
+ */
+const needle = (...parts) => parts.join('')
+
+/** §49.1 冻结词表：真实私有标识（**逐字**，不要改写成"更宽松"的等价形态）。 */
+const PRIVATE_IDENTS = [
+  needle('loo', 'm', 'y'),
+  needle('work', 'buddy'),
+  needle('deepseek-v4.1-', 'flash'),
+  needle('DeepSeek ', 'V4.1'),
+  needle('MY_', 'API_KEY'),
+  needle('MY1_', 'API_KEY'),
+  needle('TEST_', 'API_KEY'),
+  needle('MY_', 'CUSTOM_KEY'),
+  needle('MY_', 'PROVIDER_KEY'),
+  needle('MY_', 'FALLBACK_KEY'),
+  needle('21', '877'),
+  needle('C:', '\\Users'),
+  needle('C:', '/Users'),
+  needle('D:', '\\software'),
+  needle('D:', '\\temp'),
+  needle('D:', '\\UserData'),
+  needle('AppData', '\\Local'),
+  needle('8.148.', '203.162'),
+  needle('w4', 'Mute'),
+]
+
+/**
+ * 路径 / URL / 数字型词条：本身已足够特异，用**裸子串**判定。
+ * （词边界对含非单词字符的词条不适用。）
+ */
+const PRIVATE_IDENT_SUBSTRING_ONLY = new Set([
+  needle('C:', '\\Users'),
+  needle('C:', '/Users'),
+  needle('D:', '\\software'),
+  needle('D:', '\\temp'),
+  needle('D:', '\\UserData'),
+  needle('AppData', '\\Local'),
+  needle('8.148.', '203.162'),
+  needle('21', '877'),
+])
+
+/**
+ * 私有 provider / 产品族**名**：只在**上下文**里算命中。
+ *
+ * ⚠️ 为什么不能裸匹配：这两个都是普通英文词，裸匹配会把正常英文全打成命中。
+ * 本轮真实吃过"漏形态"的亏，所以要覆盖这三种写法：
+ *   ① **引号/反引号包裹**：引号里**只有**该词条本身
+ *   ② **裸键**：键名 + 冒号或等号 + 该词条（带不带引号都算）
+ *   ③ **URL 查询**：问号或 `&` + 键名 + 等号 + 该词条
+ *
+ * ⚠️ 其中一个词条**只**在②③里算命中、不算①：单独的引号包裹形式在测试代码里太常见
+ * （测试框架名、用例名），把它算命中会立刻污染别人的正常代码 ——
+ * **误报比漏报更早杀死一项检查**。
+ * ⚠️ 本文件里这两条**不能写字面量**，否则检查会命中自己 —— 见 needle() 的说明。
+ */
+const PRIVATE_CONTEXT_NAMES = [
+  { name: needle('m', 'y'), keyed: true, urlQuery: true, bareQuoted: true },
+  { name: needle('te', 'st'), keyed: true, urlQuery: true, bareQuoted: false },
+]
+
+/** 能构成"数据上下文"的键名（引号键、裸键都算）。 */
+const CONTEXT_KEY_PATTERN = '(?:provider|providerId|family|familyName|account|accountId|apiKeyEnv|key|id|name)'
+
+/** 内部协作代号：本项目开发期的内部代号，对外部读者是噪声。作为**独立一类**报告。 */
+const PRIVATE_CODENAMES = [
+  needle('W', '1'),
+  needle('W', '2'),
+  needle('W', '3'),
+  needle('W', '4'),
+  needle('W', '5'),
+  needle('W', '6'),
+  needle('W', '7'),
+  needle('H', '1'),
+]
+
+/**
+ * 扫描排除集 —— **每一项都带理由，并且会把理由打印到输出里**。
+ * 排除必须显式、可审计：不能靠"看起来像"来放过文件。
+ */
+const IDENT_EXCLUDES = [
+  { kind: 'dir', value: 'node_modules', why: '依赖目录：非本仓库作者所写，且被 .gitignore 忽略、不入库' },
+  { kind: 'dir', value: '.git', why: '版本库内部结构：不是"应入库的文件"' },
+  {
+    kind: 'file',
+    value: '.smoke.json',
+    why: '未被 git 跟踪 + 在 .gitignore 内 + 每次 runSmoke() 覆盖写的开发期产物（里面必然含本机绝对路径）',
+  },
+]
+
+/** 二进制 / 非文本扩展名：不做文本扫描（否则哈希、签名、图标必然误报）。 */
+const IDENT_SKIP_EXT = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp', '.bmp', '.svgz',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.zip', '.gz', '.tgz', '.7z', '.asar', '.node', '.dll', '.exe', '.bin', '.wasm', '.pdf',
+])
+
+/** 正则转义。 */
+function escapeForRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+/**
+ * 判据 ①：独立 token 正则 —— 按词条类型分别构造，并显式覆盖三种写法。
+ * @returns {Array<{name:string, label:string, re:RegExp}>}
+ */
+function buildIdentPatterns() {
+  const patterns = []
+  for (const token of PRIVATE_IDENTS) {
+    const escaped = escapeForRegExp(token)
+    if (PRIVATE_IDENT_SUBSTRING_ONLY.has(token)) {
+      patterns.push({ name: token, label: `字面量 ${JSON.stringify(token)}`, re: new RegExp(escaped, 'gu') })
+    } else {
+      patterns.push({
+        name: token,
+        label: `标识符 ${JSON.stringify(token)}（词边界）`,
+        re: new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'gu'),
+      })
+    }
+  }
+  for (const entry of PRIVATE_CONTEXT_NAMES) {
+    const name = escapeForRegExp(entry.name)
+    const tail = '(?![A-Za-z0-9_-])'
+    // ⚠️ 顺序有意为之：**更特异的形态排在前面**，因为同一个命中可能被多条形态同时匹配
+    // （例如同一处既像"URL 查询"又像"裸键"），下面去重时保留**先命中的那条标签**。
+    if (entry.urlQuery) {
+      patterns.push({
+        name: entry.name,
+        label: `私有名 ${JSON.stringify(entry.name)}（URL 查询形态）`,
+        re: new RegExp(`[?&]${CONTEXT_KEY_PATTERN}=${name}${tail}`, 'giu'),
+      })
+    }
+    if (entry.keyed) {
+      patterns.push({
+        name: entry.name,
+        label: `私有名 ${JSON.stringify(entry.name)}（裸键 / 引号键上下文）`,
+        re: new RegExp(`${CONTEXT_KEY_PATTERN}["']?\\s*[:=]\\s*["'\`]?${name}${tail}`, 'giu'),
+      })
+    }
+    if (entry.bareQuoted) {
+      patterns.push({
+        name: entry.name,
+        label: `私有名 ${JSON.stringify(entry.name)}（引号/反引号包裹）`,
+        re: new RegExp(`(["'\`])${name}\\1${tail}`, 'gu'),
+      })
+    }
+  }
+  return patterns
+}
+
+/**
+ * 纯函数：按路径套用**排除集**（夹具可直接测，不需要文件系统）。
+ * @param {Array<{relPath:string, text:string}>} entries 全部候选（含应排除的）
+ * @returns {{files:Array, excluded:Array<{relPath:string, why:string}>}}
+ */
+function filterIdentInputs(entries) {
+  const files = []
+  const excluded = []
+  for (const entry of entries) {
+    const segments = String(entry.relPath).split('/')
+    const name = segments[segments.length - 1]
+    const dirHit = IDENT_EXCLUDES.find((rule) => rule.kind === 'dir' && segments.slice(0, -1).includes(rule.value))
+    if (dirHit !== undefined) {
+      excluded.push({ relPath: entry.relPath, why: dirHit.why })
+      continue
+    }
+    const fileHit = IDENT_EXCLUDES.find((rule) => rule.kind === 'file' && name === rule.value)
+    if (fileHit !== undefined) {
+      excluded.push({ relPath: entry.relPath, why: fileHit.why })
+      continue
+    }
+    const ext = name.includes('.') ? name.slice(name.lastIndexOf('.')).toLowerCase() : ''
+    if (IDENT_SKIP_EXT.has(ext)) {
+      excluded.push({ relPath: entry.relPath, why: `二进制 / 非文本扩展名 ${ext}` })
+      continue
+    }
+    files.push(entry)
+  }
+  return { files, excluded }
+}
+
+/**
+ * 纯函数：**两套判据**同时跑（这是"工具漏"的防线）。
+ *
+ * - 判据 ① 独立 token 正则 → **决定 PASS/FAIL**
+ * - 判据 ② 裸子串 `includes` → 交叉核对；只在①漏掉时报出来（第三种漏法的探针）
+ *
+ * ① ⊆ ② 恒成立（① 命中的字面文本必然被 ② 找到），所以"不一致"总是"②找到而①没找到"。
+ * 这不是错误，而是**形态漏的信号**：说明某个私有标识出现了，但不在我们设想的形态里。
+ *
+ * @param {Array<{relPath:string, text:string}>} files 已过滤的候选文件
+ * @param {{codenamesFatal?:boolean}} options
+ * @returns {{hits:Array, codenameHits:Array, substringOnly:Array, scanned:number}}
+ */
+function judgePrivateIdentifiers(files) {
+  const patterns = buildIdentPatterns()
+  const codenamePatterns = PRIVATE_CODENAMES.map((name) => ({
+    name,
+    re: new RegExp(`(?<![A-Za-z0-9_])${name}(?![A-Za-z0-9_])`, 'gu'),
+  }))
+  const hits = []
+  const codenameHits = []
+  const substringOnly = []
+  /** 去重键 = 文件 + 词条：同一个位置可能被多条形态同时匹配，只应记一次。 */
+  const byPair = new Map()
+  const pushHit = (relPath, name, label, count, sample) => {
+    const key = `${relPath}\u0000${name}`
+    const existing = byPair.get(key)
+    if (existing === undefined) {
+      byPair.set(key, { relPath, name, label, count, sample })
+      return
+    }
+    // 同名多条形态命中：取**出现次数较大**的那条（同一处被两条形态数到不应翻倍），标签保留先命中的。
+    if (count > existing.count) existing.count = count
+  }
+  for (const file of files) {
+    const text = String(file.text)
+    const namesHere = new Set()
+    for (const pattern of patterns) {
+      pattern.re.lastIndex = 0
+      const found = text.match(pattern.re)
+      if (found === null || found.length === 0) continue
+      namesHere.add(pattern.name)
+      pushHit(file.relPath, pattern.name, pattern.label, found.length, found[0])
+    }
+    for (const pattern of codenamePatterns) {
+      pattern.re.lastIndex = 0
+      const found = text.match(pattern.re)
+      if (found !== null && found.length > 0) {
+        codenameHits.push({ relPath: file.relPath, name: pattern.name, count: found.length })
+      }
+    }
+    // 判据 ②：只对 §49.1 词表做（上下文名用裸子串会全是噪声）
+    for (const token of PRIVATE_IDENTS) {
+      if (text.includes(token) && !namesHere.has(token)) substringOnly.push({ relPath: file.relPath, name: token })
+    }
+  }
+  hits.push(...byPair.values())
+  return { hits, codenameHits, substringOnly, scanned: files.length }
+}
+
+/**
+ * 不纯的部分：走文件系统收集候选（目录级排除在这里剪枝，并记录为"已排除"）。
+ * @param {string} rootDir 插件目录
+ * @returns {{files:Array, excluded:Array}}
+ */
+function collectIdentInputs(rootDir) {
+  const entries = []
+  const excluded = []
+  const walk = (dir) => {
+    let children = []
+    try {
+      children = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const child of children) {
+      const full = join(dir, child.name)
+      const relPath = relative(rootDir, full).split('\\').join('/')
+      if (child.isDirectory()) {
+        const rule = IDENT_EXCLUDES.find((item) => item.kind === 'dir' && item.value === child.name)
+        if (rule !== undefined) {
+          excluded.push({ relPath, why: rule.why })
+          continue
+        }
+        walk(full)
+        continue
+      }
+      if (!child.isFile()) continue
+      let text = null
+      try {
+        text = readFileSync(full, 'utf8')
+      } catch {
+        continue
+      }
+      entries.push({ relPath, text })
+    }
+  }
+  walk(rootDir)
+  const filtered = filterIdentInputs(entries)
+  return { files: filtered.files, excluded: [...excluded, ...filtered.excluded] }
+}
+
+/** X7 夹具：`{name, entries, expect:{status?, hits?, codenameHits?, substringOnly?, excluded?, scanned?}}`。 */
+const IDENT_FIXTURES = [
+  {
+    name: `含私有产品名 ${needle('loo', 'm', 'y')} → FAIL`,
+    entries: [{ relPath: 'lib/x.js', text: `const PROVIDER = '${needle('loo', 'm', 'y')}'` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '私有名出现在裸键里 → FAIL',
+    entries: [{ relPath: 'lib/x.js', text: `const c = { provider: "${needle('m', 'y')}" }` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '私有名出现在 URL 查询里 → FAIL',
+    entries: [{ relPath: 'client.js', text: `fetch('/status?x=1&provider=${needle('m', 'y')}')` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '私有名被反引号包裹 → FAIL',
+    entries: [{ relPath: 'README.md', text: `请优先用 \`${needle('m', 'y')}\` provider 下的模型` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: `含本机用户名 ${needle('21', '877')} → FAIL`,
+    entries: [{ relPath: 'lib/x.js', text: `const n = "${needle('21', '877')}"` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '含 Windows 用户目录（反斜杠形态）→ FAIL',
+    entries: [{ relPath: 'lib/x.js', text: `const p = "${needle('C:', '\\Users')}\\x\\.dsh"` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '含 Windows 用户目录（正斜杠形态）→ FAIL',
+    entries: [{ relPath: 'lib/x.js', text: `const p = "${needle('C:', '/Users')}/x/.dsh"` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '含非系统盘的临时目录 → FAIL',
+    entries: [{ relPath: 'lib/x.js', text: `const scratch = "${needle('D:', '\\temp')}\\x"` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '含私有环境变量名 → FAIL',
+    entries: [{ relPath: 'test/x.test.mjs', text: `process.env.${needle('MY_', 'API_KEY')}` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: `含旧式变量名 ${needle('w4', 'Mute')} → FAIL`,
+    entries: [{ relPath: 'tools/x.mjs', text: `const ${needle('w4', 'Mute')} = { left: 1 }` }],
+    expect: { status: 'FAIL', hits: 1 },
+  },
+  {
+    name: '.smoke.json 样式的文件 → PASS（被排除）',
+    entries: [
+      {
+        relPath: '.smoke.json',
+        text: `{"smokePath":"${needle('C:', '\\Users')}\\${needle('21', '877')}\\.dsh\\x"}`,
+      },
+      { relPath: 'lib/x.js', text: 'const ok = 1' },
+    ],
+    expect: { status: 'PASS', hits: 0, excluded: 1, scanned: 1 },
+  },
+  {
+    name: 'node_modules/ 下的文件 → PASS（被排除）',
+    entries: [
+      { relPath: 'node_modules/lmfpd-sdk/index.js', text: `const p = "${needle('D:', '\\software')}\\x"` },
+      { relPath: 'lib/x.js', text: 'const ok = 1' },
+    ],
+    expect: { status: 'PASS', hits: 0, excluded: 1, scanned: 1 },
+  },
+  {
+    name: '合成哨兵（故意长成密钥样子的测试常量）→ PASS',
+    entries: [{ relPath: 'test/targets.test.mjs', text: "const SECRET = 'sk-super-secret-value-must-never-leak'" }],
+    expect: { status: 'PASS', hits: 0 },
+  },
+  {
+    name: '公开名（deepseek-official / DEEPSEEK_API_KEY / openai / anthropic / @deepseek-ai / 127.0.0.1）→ PASS',
+    entries: [
+      {
+        relPath: 'lib/targets.js',
+        text: "const a = 'deepseek-official'; const b = 'DEEPSEEK_API_KEY'; const c = 'openai'; const d = 'anthropic'; const e = '@deepseek-ai/dsh-client-store'; const f = 'api.deepseek.com'; const g = 'http://127.0.0.1:2418'; const h = { family: 'deepseek', familyName: 'DeepSeek' };",
+      },
+    ],
+    expect: { status: 'PASS', hits: 0 },
+  },
+  {
+    name: '普通英文（无上下文）→ PASS（不误伤）',
+    entries: [{ relPath: 'README.md', text: 'my own provider is configured; run the test suite.' }],
+    expect: { status: 'PASS', hits: 0 },
+  },
+  {
+    name: '单独的引号包裹测试框架名 → PASS（刻意不算命中）',
+    entries: [{ relPath: 'test/x.test.mjs', text: `describe('${needle('te', 'st')}', () => {})` }],
+    expect: { status: 'PASS', hits: 0 },
+  },
+  {
+    name: '数字型证据（端口 / 计数 / 版本号）→ PASS',
+    entries: [{ relPath: 'lib/index.js', text: 'const port = 2418; const order = 40; const a = 127; const b = 203;' }],
+    expect: { status: 'PASS', hits: 0 },
+  },
+  {
+    name: '内部协作代号 → 计入代号类（不计入 hits）',
+    entries: [{ relPath: 'lib/x.js', text: needle('// W', '4 产出物') }],
+    expect: { status: 'PASS', hits: 0, codenameHits: 1 },
+  },
+  {
+    name: '【漏法探针】词条嵌在更长标识符里 → 判据①不中、判据②中',
+    entries: [{ relPath: 'lib/x.js', text: `const X = 'X${needle('loo', 'm', 'y')}Y'` }],
+    expect: { status: 'PASS', hits: 0, substringOnly: 1 },
+  },
+]
+
+/**
+ * 跑 X7 夹具自测：证明它**可红可绿**，且排除集与"公开名不误伤"两头都成立。
+ * @returns {boolean}
+ */
+function runIdentSelfTest() {
+  let mismatches = 0
+  let redCases = 0
+  let greenCases = 0
+  process.stdout.write(`\n私有标识检查夹具自测（X7 —— §49.1 词表 + 两套判据 + 排除集）：\n\n`)
+  process.stdout.write(`（${IDENT_FIXTURES.length} 个夹具）\n\n`)
+  for (const fixture of IDENT_FIXTURES) {
+    const filtered = filterIdentInputs(fixture.entries)
+    const verdict = judgePrivateIdentifiers(filtered.files)
+    const status = verdict.hits.length > 0 ? 'FAIL' : 'PASS'
+    if (status === 'FAIL') redCases += 1
+    else greenCases += 1
+    const actual = {
+      status,
+      hits: verdict.hits.length,
+      codenameHits: verdict.codenameHits.length,
+      substringOnly: verdict.substringOnly.length,
+      excluded: filtered.excluded.length,
+      scanned: filtered.files.length,
+    }
+    const cells = []
+    let fixtureBad = false
+    for (const [key, want] of Object.entries(fixture.expect)) {
+      const got = actual[key]
+      const ok = got === want
+      if (!ok) {
+        mismatches += 1
+        fixtureBad = true
+      }
+      cells.push(`${key}:${JSON.stringify(got)}${ok ? '' : `(期望${JSON.stringify(want)}!)`}`)
+    }
+    process.stdout.write(`  ${fixtureBad ? '✘' : '·'} ${fixture.name}\n      ${cells.join('  ')}\n`)
+    if (fixtureBad) {
+      process.stdout.write(`      命中明细: ${verdict.hits.map((h) => `${h.relPath}→${h.name}`).join(', ') || '(无)'}\n`)
+    }
+  }
+  const bothReachable = redCases > 0 && greenCases > 0
+  process.stdout.write('\n可达性（必须既能 FAIL 也能 PASS）：\n')
+  process.stdout.write(`  可判 FAIL 的夹具: ${redCases} 个（需 > 0）\n`)
+  process.stdout.write(`  可判 PASS 的夹具: ${greenCases} 个（需 > 0）\n`)
+  const ok = mismatches === 0 && bothReachable
+  process.stdout.write(`\n断言不符 ${mismatches} 处；不可达项 ${bothReachable ? 0 : 1} 项\n`)
+  process.stdout.write(`结论: ${ok ? 'PASS（X7 可红可绿，排除集与公开名均不误伤）' : 'FAIL（夹具或判定逻辑有问题）'}\n`)
+  return ok
 }
 
 /** C7 的输出要显示判定对象，而判定对象现在是动态的 ⇒ 标题也做成函数。 */
@@ -1362,21 +1859,134 @@ function resolveRuntimeVersion(options = {}) {
 }
 
 /**
+ * 「判定引擎」的候选路径：找 DSH 自己那份 `dsh-app-boot/lib/index.js`。
+ *
+ * 复用运行时候选表 —— 因为两者在同一个 `@deepseek-ai/` 作用域目录下：
+ *   `<scoped>/dsh/package.json`  →  `<scoped>/dsh-app-boot/lib/index.js`
+ * 另外支持 `DSH_APP_BOOT` 直接给文件路径（非标准布局的逃生口）。
+ * @param {string|null|undefined} extraPackagePath 由 `--dsh-pkg` 指定的额外候选
+ * @returns {string[]} 去重后的候选绝对路径
+ */
+function defaultBootCandidates(extraPackagePath) {
+  const out = []
+  const push = (candidate) => {
+    if (typeof candidate === 'string' && candidate !== '' && !out.includes(candidate)) out.push(candidate)
+  }
+  if (typeof process.env.DSH_APP_BOOT === 'string' && process.env.DSH_APP_BOOT !== '') push(process.env.DSH_APP_BOOT)
+  for (const runtimePackage of defaultRuntimeCandidates(extraPackagePath)) {
+    push(join(dirname(dirname(runtimePackage)), 'dsh-app-boot', 'lib', 'index.js'))
+  }
+  return out
+}
+
+/** 自研引擎（兜底）：按 DSH 的 includePrerelease 语义，但**不是** DSH 的实现。 */
+function builtinJudgeEngine() {
+  return {
+    kind: 'builtin',
+    label: '自研 semver 实现（兜底）',
+    detail:
+      '⚠️ 这是**自研的等价实现**（按 DSH 的 includePrerelease 语义），**可能随 DSH 变动而失真**；能定位到已装 DSH 时应优先使用它自己的实现。',
+    decide: (range, version) => {
+      const verdict = satisfiesRange(version, range)
+      return { allowed: verdict.ok, reason: verdict.reason, groups: verdict.groups }
+    },
+  }
+}
+
+/**
+ * 加载一份 DSH 的 `dsh-app-boot`，用**它自己的** `evaluatePluginCompatibility` 当判定引擎。
+ * 加载后先做**双向自检探针**（一个必过、一个必不过），防止加载到行为异常的模块。
+ * @param {string} bootPath `dsh-app-boot/lib/index.js` 的绝对路径
+ * @returns {Promise<object>} 引擎对象
+ * @throws 模块加载失败 / 缺少导出 / 探针不符时抛出（由调用方继续试下一个候选）
+ */
+async function loadDshJudgeEngine(bootPath) {
+  const loaded = await import(pathToFileURL(bootPath).href)
+  if (typeof loaded.evaluatePluginCompatibility !== 'function') {
+    throw new Error('该模块没有导出 evaluatePluginCompatibility')
+  }
+  const make = (range) => ({ name: 'dsh-judge-probe', version: '0.0.0', engines: { dsh: range } })
+  const probePass = loaded.evaluatePluginCompatibility(make('>=0.0.0'), {}, '1.2.3')
+  const probeFail = loaded.evaluatePluginCompatibility(make('>=99.0.0'), {}, '1.2.3')
+  if (probePass !== undefined || probeFail === undefined) {
+    throw new Error('双向自检探针未通过（该模块的判定行为异常）')
+  }
+  return {
+    kind: 'dsh',
+    label: 'DSH 自己的实现（evaluatePluginCompatibility）',
+    detail: `直接调用 ${bootPath} 导出的 evaluatePluginCompatibility —— 这就是 DSH 真实使用的判定，因此不可能与它语义不一致`,
+    decide: (range, version) => {
+      const issue = loaded.evaluatePluginCompatibility(
+        { name: PKG_NAME, version: PKG_VERSION, engines: { dsh: range } },
+        {},
+        version,
+      )
+      return issue === undefined
+        ? {
+            allowed: true,
+            reason: `evaluatePluginCompatibility(runtime=${version}, range=${JSON.stringify(range)}) 返回 undefined ⇒ 放行`,
+          }
+        : {
+            allowed: false,
+            reason: `evaluatePluginCompatibility(runtime=${version}) 判定不满足：requirements=${JSON.stringify(issue.requirements)}`,
+          }
+    },
+  }
+}
+
+/**
+ * 解析判定引擎：**优先用 DSH 自己的实现**（这是本次事故的教训 —— 必须调用被判定方自己的实现），
+ * 读不到才回落到自研实现，并在输出里注明。
+ * @param {{extraPackagePath?:string|null, candidates?:string[], loader?:(p:string)=>Promise<object>}} options
+ * @returns {Promise<object>} 引擎对象（含 `probe` 探测记录）
+ */
+async function resolveJudgeEngine(options = {}) {
+  if (typeof options.engine === 'object' && options.engine !== null) return options.engine
+  const candidates = Array.isArray(options.candidates)
+    ? options.candidates
+    : defaultBootCandidates(options.extraPackagePath)
+  const loader = typeof options.loader === 'function' ? options.loader : loadDshJudgeEngine
+  const probe = []
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) {
+        probe.push({ path: candidate, ok: false, error: '文件不存在' })
+        continue
+      }
+      const engine = await loader(candidate)
+      probe.push({ path: candidate, ok: true, error: null })
+      return { ...engine, probe }
+    } catch (error) {
+      probe.push({ path: candidate, ok: false, error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  return { ...builtinJudgeEngine(), probe }
+}
+
+/**
  * 对一份 package.json 对象判定 C7 / X5 / X6 —— **发布就绪性**。
  * 抽成纯函数：主流程与 `--self-test` 共用同一份判定，避免自测与真实检查漂移。
  * @param {object} pkg 已解析的 package.json
  * @param {{version:string, source:string, sourceLabel:string, detail:string}} runtime C7 的判定对象（由 resolveRuntimeVersion 给出）
+ * @param {object} engine C7 的判定引擎（由 resolveJudgeEngine 给出；夹具可注入）
  * @returns {{entries: Array<{id:string,title:string,status:string,evidence:string[]}>}}
  */
-function judgeManifest(pkg, runtime) {
+function judgeManifest(pkg, runtime, engine) {
+  const judge = engine ?? builtinJudgeEngine()
   const titles = manifestTitles(runtime.version)
   const entries = []
   const add = (id, status, evidence) => entries.push({ id, title: titles[id], status, evidence })
   const sourceLine = `判定对象 = ${runtime.version}  （${runtime.sourceLabel}）`
+  const engineLine = `判定引擎 = ${judge.label}`
   /** 回落路径必须显式提示"可能已过时"，否则这个结论会误导人。 */
   const sourceWarn =
     runtime.source === 'fallback'
       ? [`[⚠️ 注意] 判定对象来自**硬编码常量**（采集时刻 ${CAPTURE_DATE}），可能已过时 —— 若你的 DSH 已升级，请用 --dsh-version <ver> 复核。`]
+      : []
+  /** 自研引擎必须自曝身份，不能让人以为这就是 DSH 的结论。 */
+  const engineWarn =
+    judge.kind === 'builtin'
+      ? [`[⚠️ 注意] 判定用的是**自研 semver 实现**（不是 DSH 自己的实现），可能随 DSH 变动而失真 —— 见输出里的「判定引擎」一行与候选探测记录。`]
       : []
 
   // ── C7：必须声明 engines.dsh，且覆盖当前运行时 ──
@@ -1386,29 +1996,37 @@ function judgeManifest(pkg, runtime) {
       add('C7', 'FAIL', [
         '未声明 engines.dsh ✘ —— 发布包必须声明它，使用者/宿主才能判断兼容性。',
         sourceLine,
-        `[期望] engines.dsh 是一个覆盖 ${runtime.version} 的 semver range，例如 ${JSON.stringify('>=0.2.1-rc.2 <0.3.0')}。`,
+        engineLine,
+        `[期望] engines.dsh 是一个覆盖 ${runtime.version} 的 semver range，例如 ${JSON.stringify('>=0.2.1-rc.2 <0.3.0-0')}。`,
         '[note] 与"本地开发"的取舍相反：本地开发刻意不声明它（避免不兼容时被静默 skip）；发布必须声明。',
         ...sourceWarn,
+        ...engineWarn,
       ])
     } else if (typeof raw !== 'string') {
       add('C7', 'FAIL', [
         `engines.dsh 不是字符串 ✘（实际类型 ${typeof raw}，值 ${JSON.stringify(raw)}）。`,
         sourceLine,
+        engineLine,
         '[期望] 合法 semver range 字符串。',
         ...sourceWarn,
+        ...engineWarn,
       ])
     } else {
-      const verdict = satisfiesRange(runtime.version, raw)
+      const verdict = judge.decide(raw, runtime.version)
       const evidence = [
         `engines.dsh = ${JSON.stringify(raw)}`,
         sourceLine,
+        engineLine,
         `判定对象来源细节：${runtime.detail}`,
+        `判定引擎细节：${judge.detail}`,
         `判定过程：${verdict.reason}`,
       ]
-      if (verdict.groups === null) {
-        evidence.push('[期望] 合法 semver range 字符串（支持 = > >= < <= ^ ~ 与 x/* 通配、`||` 分组）。')
-      } else {
-        evidence.push(`解析出的 OR 组数 = ${verdict.groups.length}`)
+      if (judge.kind === 'builtin') {
+        if (verdict.groups === null) {
+          evidence.push('[期望] 合法 semver range 字符串（支持 = > >= < <= ^ ~ 与 x/* 通配、`||` 分组）。')
+        } else {
+          evidence.push(`解析出的 OR 组数 = ${verdict.groups.length}`)
+        }
       }
       const peers = Object.keys(pkg.peerDependencies ?? {})
       const dshPeers = peers.filter((name) => /^@deepseek-ai\/dsh(?:-|$)/u.test(name))
@@ -1418,8 +2036,8 @@ function judgeManifest(pkg, runtime) {
         )
       }
       evidence.push('[依据] dsh-app-boot/lib/index.js:301-304：声明了 engines.dsh 就只看它、忽略全部 dsh peer。')
-      evidence.push(...sourceWarn)
-      add('C7', verdict.ok ? 'PASS' : 'FAIL', evidence)
+      evidence.push(...sourceWarn, ...engineWarn)
+      add('C7', verdict.allowed ? 'PASS' : 'FAIL', evidence)
     }
   }
 
@@ -1446,6 +2064,28 @@ function judgeManifest(pkg, runtime) {
   return { entries }
 }
 
+/**
+ * 夹具用的**假 DSH 引擎**：只按一张固定表回答。
+ *
+ * 用途：证明 `judgeManifest` **真的调用 `engine.decide`**，而不是偷偷用自己的实现。
+ * 夹具里刻意让假引擎的答案与自研实现**相反** —— 若引擎没被接进去，这些夹具立刻会红。
+ * @param {Record<string, boolean>} table 键为 `` `${range}@${version}` ``
+ */
+function fakeDshEngine(table) {
+  return {
+    kind: 'dsh',
+    label: '夹具假 DSH 引擎（用于证明引擎接入生效）',
+    detail: '夹具注入的假引擎：按固定表回答，答案刻意与自研实现相反',
+    decide: (range, version) => {
+      const key = `${range}@${version}`
+      if (Object.hasOwn(table, key)) {
+        return { allowed: table[key], reason: `假引擎按表回答 ${key} ⇒ ${table[key] ? '放行' : '不满足'}` }
+      }
+      return { allowed: false, reason: `假引擎表里没有 ${key}` }
+    },
+  }
+}
+
 /** 发布清单夹具：`{name, pkg, expect}`；`expect` 未列出的检查默认期望 PASS。 */
 const MANIFEST_FIXTURES = [
   { name: '发布就绪（基准）', pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0' }, license: 'MIT' }, expect: {} },
@@ -1457,14 +2097,15 @@ const MANIFEST_FIXTURES = [
   { name: 'range 上界排除运行时（<0.2.0）', pkg: { engines: { dsh: '<0.2.0' }, license: 'MIT' }, expect: { C7: 'FAIL' } },
   { name: 'range 落到下一段（>=0.3.0）', pkg: { engines: { dsh: '>=0.3.0' }, license: 'MIT' }, expect: { C7: 'FAIL' } },
   {
-    name: '数值通过但**预发布不准入**（>=0.2.0）',
+    name: '预发布照常参与比较：>=0.2.0 放行 0.2.1-rc.3（DSH 的 includePrerelease 语义）',
     pkg: { engines: { dsh: '>=0.2.0' }, license: 'MIT' },
-    expect: { C7: 'FAIL' },
+    expect: {},
+    expectEvidence: { C7: ['includePrerelease'] },
   },
   {
-    name: '通配 0.2.x（同样预发布不准入 → FAIL）',
+    name: '通配 0.2.x 同样放行 0.2.1-rc.3（= >=0.2.0 <0.3.0）',
     pkg: { engines: { dsh: '0.2.x' }, license: 'MIT' },
-    expect: { C7: 'FAIL' },
+    expect: {},
   },
   { name: '写法 ^0.2.1-rc.2（预发布准入成立）', pkg: { engines: { dsh: '^0.2.1-rc.2' }, license: 'MIT' }, expect: {} },
   { name: '写法 ~0.2.1-rc.2', pkg: { engines: { dsh: '~0.2.1-rc.2' }, license: 'MIT' }, expect: {} },
@@ -1551,6 +2192,66 @@ const MANIFEST_FIXTURES = [
     expect: { C7: 'FAIL' },
     expectEvidence: { C7: ['可能已过时'] },
   },
+  // ── A vs B：同一个"意图"（只用 0.2.x）下的真实差异（ground truth 来自 DSH 自己的函数）──
+  {
+    name: 'B 范围 + 0.2.2-rc.1 → 放行（rc 应当被接受）',
+    runtime: { version: '0.2.2-rc.1', source: 'fixture', sourceLabel: '来源：夹具（模拟运行时 0.2.2-rc.1）', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: {},
+  },
+  {
+    name: 'B 范围 + 0.2.5-rc.1 → 放行',
+    runtime: { version: '0.2.5-rc.1', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: {},
+  },
+  {
+    name: 'A 范围（缺 `-0`）+ 0.3.0-rc.1 → **放行**（这就是 A 的缺口）',
+    runtime: { version: '0.3.0-rc.1', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0' }, license: 'MIT' },
+    expect: {},
+  },
+  {
+    name: 'B 范围（带 `-0`）+ 0.3.0-rc.1 → **不覆盖（FAIL）** —— B 存在的理由',
+    runtime: { version: '0.3.0-rc.1', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: { C7: 'FAIL' },
+    expectEvidence: { C7: ['不满足'] },
+  },
+  {
+    name: 'B 范围 + 0.3.0 → 不覆盖（FAIL）',
+    runtime: { version: '0.3.0', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: { C7: 'FAIL' },
+  },
+  {
+    name: 'B 范围 + 0.4.0-rc.1 → 不覆盖（FAIL）',
+    runtime: { version: '0.4.0-rc.1', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: { C7: 'FAIL' },
+  },
+  {
+    name: 'B 范围 + 0.2.1-rc.1（低于下界）→ 不覆盖（FAIL）',
+    runtime: { version: '0.2.1-rc.1', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: { C7: 'FAIL' },
+  },
+  {
+    name: '【引擎接入】假 DSH 引擎说"不放行" → C7 必须 FAIL（自研实现本会 PASS）',
+    runtime: { version: '0.2.1-rc.3', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    engine: fakeDshEngine({ '>=0.2.1-rc.2 <0.3.0-0@0.2.1-rc.3': false }),
+    pkg: { engines: { dsh: '>=0.2.1-rc.2 <0.3.0-0' }, license: 'MIT' },
+    expect: { C7: 'FAIL' },
+    expectEvidence: { C7: ['夹具假 DSH 引擎'] },
+  },
+  {
+    name: '【引擎接入】假 DSH 引擎说"放行" → C7 必须 PASS（自研实现本会 FAIL）',
+    runtime: { version: '0.2.1-rc.3', source: 'fixture', sourceLabel: '来源：夹具', detail: '夹具' },
+    engine: fakeDshEngine({ '>=99.0.0@0.2.1-rc.3': true }),
+    pkg: { engines: { dsh: '>=99.0.0' }, license: 'MIT' },
+    expect: {},
+    expectEvidence: { C7: ['夹具假 DSH 引擎'] },
+  },
 ]
 
 /** 未显式给 runtime 的夹具，默认用"动态读取成功、读到采集时刻那个版本"。 */
@@ -1560,6 +2261,9 @@ const DEFAULT_FIXTURE_RUNTIME = {
   sourceLabel: '来源：夹具默认（模拟动态读取成功）',
   detail: `夹具默认：模拟动态读取成功 → ${RUNTIME_VERSION_AT_CAPTURE}`,
 }
+
+/** 未显式给 engine 的夹具用自研实现（它现在与 DSH 同语义，见 satisfiesRange 的说明）。 */
+const DEFAULT_FIXTURE_ENGINE = builtinJudgeEngine()
 
 /**
  * 跑发布清单夹具自测（C7 / X5 / X6），证明三项既可达 PASS 也可达 FAIL，
@@ -1574,11 +2278,14 @@ function runManifestSelfTest() {
   const routeReach = new Map(sources.map((source) => [source, { pass: false, fail: false, cases: 0 }]))
   let mismatches = 0
   let evidenceChecks = 0
+  let engineCases = 0
   process.stdout.write(`\n发布清单夹具自测（C7 / X5 / X6 —— 发布语义）：\n\n`)
   process.stdout.write(`（${MANIFEST_FIXTURES.length} 个夹具 × ${ids.length} 项 = ${MANIFEST_FIXTURES.length * ids.length} 个状态断言）\n\n`)
   for (const fixture of MANIFEST_FIXTURES) {
     const runtime = fixture.runtime ?? DEFAULT_FIXTURE_RUNTIME
-    const verdict = judgeManifest(fixture.pkg, runtime)
+    const engine = fixture.engine ?? DEFAULT_FIXTURE_ENGINE
+    if (fixture.engine !== undefined) engineCases += 1
+    const verdict = judgeManifest(fixture.pkg, runtime, engine)
     const got = new Map(verdict.entries.map((entry) => [entry.id, entry.status]))
     const cells = []
     let fixtureBad = false
@@ -1594,8 +2301,9 @@ function runManifestSelfTest() {
       }
       cells.push(`${id}:${actual}${ok ? '' : `(期望${want}!)`}`)
     }
-    // 三级取值的可达性：只在夹具**显式给了 runtime** 时统计，保证三路各有一组红/绿样例
-    if (fixture.runtime !== undefined) {
+    // 三级取值的可达性：只在夹具**显式给了 runtime** 且来源属于三级取值时统计，
+    // 保证三路各有一组红/绿样例（另有专门标注"夹具"的边界夹具，不参与这里的统计）
+    if (fixture.runtime !== undefined && routeReach.has(runtime.source)) {
       const slot = routeReach.get(runtime.source)
       const status = got.get('C7')
       if (status === 'PASS') slot.pass = true
@@ -1643,8 +2351,8 @@ function runManifestSelfTest() {
     )
   }
   const ok = mismatches === 0 && unreachable === 0
-  process.stdout.write(`\n证据断言 ${evidenceChecks} 条；断言不符 ${mismatches} 处；不可达项 ${unreachable} 项\n`)
-  process.stdout.write(`结论: ${ok ? 'PASS（C7/X5/X6 与三级取值都可红可绿，无死代码）' : 'FAIL（夹具或判定逻辑有问题）'}\n`)
+  process.stdout.write(`\n证据断言 ${evidenceChecks} 条（另：${engineCases} 个夹具注入了假判定引擎，用于证明引擎真的被调用）；断言不符 ${mismatches} 处；不可达项 ${unreachable} 项\n`)
+  process.stdout.write(`结论: ${ok ? 'PASS（C7/X5/X6 与三级取值都可红可绿，引擎接入生效，无死代码）' : 'FAIL（夹具或判定逻辑有问题）'}\n`)
   return ok
 }
 
@@ -1783,15 +2491,81 @@ if (!ARGS.json) {
   process.stdout.write(`  链接位置 : ${LINK_PATH}\n`)
   process.stdout.write(`  node     : ${process.version}\n`)
   process.stdout.write(`  C7 判定对象: ${RUNTIME.version}  （${RUNTIME.sourceLabel}）\n`)
+  process.stdout.write(`  C7 判定引擎: ${JUDGE.label}\n`)
   process.stdout.write(`  时间     : ${new Date().toISOString()}\n\n`)
 }
 
+// ── --judge-matrix：核对"自研实现"与"DSH 实现"是否一致（本次事故的回归工具） ──
+if (ARGS.judgeMatrix) {
+  const versions = [
+    '0.2.0', '0.2.1-rc.1', '0.2.1-rc.2', '0.2.1-rc.3', '0.2.1', '0.2.2-rc.1',
+    '0.2.5-rc.1', '0.2.9', '0.3.0-rc.1', '0.3.0', '0.4.0-rc.1', '1.0.0',
+  ]
+  const ranges = [
+    '>=0.2.1-rc.2 <0.3.0',
+    '>=0.2.1-rc.2 <0.3.0-0',
+    '^0.2.1-rc.2',
+    '>=0.2.1-rc.2',
+    '>=0.2.0',
+    '0.2.x',
+    '~0.2.1-rc.2',
+    '=0.2.1-rc.3',
+    '>=0.1.0 <0.2.0 || >=0.2.1-rc.2 <0.3.0',
+    '>=0.3.0',
+    '>=0.2.2',
+    '<0.2.0',
+    'not-a-range',
+    '',
+  ]
+  const builtin = builtinJudgeEngine()
+  process.stdout.write('判定矩阵（✔=放行 / ✖=不满足）\n\n')
+  process.stdout.write(`自研引擎: ${builtin.label}\n`)
+  process.stdout.write(`DSH 引擎: ${JUDGE.label}\n`)
+  if (JUDGE.kind !== 'dsh') {
+    process.stdout.write('  ⚠️ 没定位到已装 DSH 的实现 ⇒ 无法做一致性核对。\n')
+    process.stdout.write('     可用 --dsh-pkg <安装目录>/node_modules/@deepseek-ai/dsh/package.json 指向它。\n')
+  }
+  process.stdout.write('\n')
+  let mismatch = 0
+  let compared = 0
+  const cell = (engine, range, version) => {
+    try {
+      return engine.decide(range, version).allowed ? '✔' : '✖'
+    } catch {
+      return '!'
+    }
+  }
+  process.stdout.write(`range \\ version  ${versions.map((v) => v.padEnd(12)).join('')}\n`)
+  for (const range of ranges) {
+    const builtinRow = versions.map((v) => cell(builtin, range, v))
+    const dshRow = versions.map((v) => cell(JUDGE, range, v))
+    const flags = versions.map((_, index) => {
+      if (JUDGE.kind !== 'dsh') return ' '
+      compared += 1
+      if (builtinRow[index] === dshRow[index]) return ' '
+      mismatch += 1
+      return '!'
+    })
+    process.stdout.write(`${JSON.stringify(range).padEnd(18)}${builtinRow.map((v) => v.padEnd(12)).join('')}  ← 自研\n`)
+    process.stdout.write(`${''.padEnd(18)}${dshRow.map((v) => v.padEnd(12)).join('')}  ← ${JUDGE.kind === 'dsh' ? 'DSH' : '(不可用，与上行相同)'}\n`)
+    if (JUDGE.kind === 'dsh' && flags.some((flag) => flag === '!')) {
+      process.stdout.write(`${''.padEnd(18)}${flags.map((f) => (f === '!' ? '不一致!'.padEnd(12) : ''.padEnd(12))).join('')}\n`)
+    }
+  }
+  process.stdout.write(
+    JUDGE.kind === 'dsh'
+      ? `\n一致性核对：比较 ${compared} 个组合，不一致 ${mismatch} 处 ${mismatch === 0 ? '✔（自研实现与 DSH 完全一致）' : '✘（自研实现已与 DSH 漂移！）'}\n`
+      : '\n（未与 DSH 核对：没定位到它的实现）\n',
+  )
+  process.exit(mismatch === 0 ? 0 : 1)
+}
 // ── --self-test：只跑夹具自测并退出（不碰任何被检文件） ─────────────────────
 if (ARGS.selftest) {
   const slotsOk = runSlotSelfTest()
   const manifestOk = runManifestSelfTest()
   const runtimeOk = runRuntimeSelfTest()
-  process.exit(slotsOk && manifestOk && runtimeOk ? 0 : 1)
+  const identOk = runIdentSelfTest()
+  process.exit(slotsOk && manifestOk && runtimeOk && identOk ? 0 : 1)
 }
 
 if (!PLUGIN_EXISTS) {
@@ -1847,7 +2621,7 @@ if (!PLUGIN_EXISTS) {
     const evidence = [
       `路径: ${pkgPath}`,
       `name=${JSON.stringify(pkg.name)}  version=${JSON.stringify(pkg.version)}  type=${JSON.stringify(pkg.type)}  main=${JSON.stringify(pkg.main)}`,
-      '[note] §2.2 规定客户端入口只认 exports["./client"]、不看 main；但 W4 验收清单要求 main 存在。',
+      '[note] §2.2 规定客户端入口只认 exports["./client"]、不看 main；但本仓库的验收清单要求 main 存在。',
     ]
     if (missing.length > 0) {
       report('C1', 'package.json 可解析；含 name / version / type==="module" / main（契约 §1、§2.2）', 'FAIL', [
@@ -1976,9 +2750,9 @@ if (!PLUGIN_EXISTS) {
         evidence.push('目标文件存在 ✔')
         report('C4', 'exports["./client"] 存在且目标文件真实存在（契约 §2.2）', 'PASS', evidence)
       } else {
-        // 结构性声明没问题，只是文件还没产出（由 W6 并行落盘）→ 按验收清单的 SKIP 规则处理
+        // 结构性声明没问题，只是文件还没产出（客户端束尚未落盘）→ 按验收清单的 SKIP 规则处理
         clientPending = true
-        evidence.push('目标文件尚未产出 ✘ —— 客户端束（W6）还没落盘。')
+        evidence.push('目标文件尚未产出 ✘ —— 客户端束还没落盘。')
         evidence.push('[SKIP 理由] 声明本身合规，属"文件尚未就绪"；交付前此项必须转为 PASS。')
         report('C4', 'exports["./client"] 存在且目标文件真实存在（契约 §2.2）', 'SKIP', evidence)
       }
@@ -2070,7 +2844,7 @@ if (!PLUGIN_EXISTS) {
       report(id, title, 'SKIP', [`package.json 不可用: ${pkgReadError ?? '未知原因'}`])
     }
   } else {
-    for (const entry of judgeManifest(pkg, RUNTIME).entries) {
+    for (const entry of judgeManifest(pkg, RUNTIME, JUDGE).entries) {
       report(entry.id, entry.title, entry.status, entry.evidence)
     }
   }
@@ -2264,7 +3038,7 @@ if (!PLUGIN_EXISTS) {
       report(id, title, 'SKIP', [
         `客户端束尚未产出: ${resolvedClientPath}`,
         `来源: ${resolvedClientOrigin}`,
-        '[SKIP 理由] 文件尚未就绪（W6 并行落盘）；交付前必须转为 PASS。',
+        '[SKIP 理由] 文件尚未就绪（客户端束尚未落盘）；交付前必须转为 PASS。',
       ])
     }
   } else {
@@ -2402,10 +3176,74 @@ if (!PLUGIN_EXISTS) {
   }
 }
 
+  // ── X7：本仓库不含私有标识（§49.1 词表，冻结） ────────────────────────
+  // 单点实现见文件上方的「X7」常量区；这里只负责收集 + 报告。
+  if (!PLUGIN_EXISTS) {
+    report('X7', '本仓库不含私有标识（§49.1 词表：本机路径 / 私有环境变量名 / 私有 provider 名）', 'SKIP', [
+      `插件目录不存在: ${PLUGIN_DIR}`,
+    ])
+  } else {
+    const collected = collectIdentInputs(PLUGIN_DIR)
+    const verdict = judgePrivateIdentifiers(collected.files)
+    const totalChars = collected.files.reduce((sum, file) => sum + file.text.length, 0)
+    const dirNames = IDENT_EXCLUDES.filter((rule) => rule.kind === 'dir').map((rule) => `${rule.value}/`)
+    const dirHit = collected.excluded.filter((item) => dirNames.includes(`${item.relPath}/`) || dirNames.includes(item.relPath)).map((item) => item.relPath)
+    const smokeExcluded = collected.excluded.filter((item) => item.relPath === '.smoke.json').length > 0
+    const evidence = [
+      `扫描范围: ${PLUGIN_DIR}`,
+      `扫描了 ${collected.files.length} 个文本文件（合计 ${totalChars} 字符）；排除了 ${collected.excluded.length} 项`,
+      `判据 ① 独立 token 正则 → ${verdict.hits.length} 处命中（**决定 PASS/FAIL**）`,
+      `判据 ② 裸子串 includes → 交叉核对：①漏掉 ${verdict.substringOnly.length} 处（下面单列，作为"第三种漏法"的探针）`,
+      '[排除集（逐条理由，排除必须显式可审计）]',
+    ]
+    for (const rule of IDENT_EXCLUDES) {
+      evidence.push(`  - ${rule.kind === 'dir' ? `${rule.value}/` : rule.value}：${rule.why}`)
+    }
+    evidence.push(`  实际排除命中：目录 ${dirHit.length > 0 ? dirHit.map((item) => `${item}/`).join(', ') : '(无)'}`)
+    evidence.push(`                文件 ${smokeExcluded ? '.smoke.json（存在，已排除）' : '.smoke.json（当前不存在，规则仍在）'}`)
+    evidence.push('[刻意**不算**命中的三类（否则一上线就误报）]')
+    evidence.push('  1) 合成哨兵 —— 测试里的密钥"长成密钥的样子"是故意的（若出现在输出里测试即红）；本词表不含通用 `sk-` 前缀规则，故不会误报。')
+    evidence.push('  2) 公开名 —— deepseek-official / deepseek-account / deepseek-chat / openai / anthropic / DEEPSEEK_API_KEY / DEEPSEEK_ACCOUNT_API_KEY / DEEPSEEK_OFFICIAL_API_KEY / DSH_FINGERPRINT_* / @deepseek-ai/* / api.deepseek.com / 127.0.0.1 / RFC1918·RFC5737 / family:"deepseek" / familyName:"DeepSeek" —— 均**不在**词表内。')
+    evidence.push('  3) 数字型证据（端口 2418、order 40、各类计数）—— 不在词表内。')
+    if (verdict.hits.length > 0) {
+      evidence.push('[命中明细 —— 判据 ①]')
+      for (const hit of verdict.hits) {
+        evidence.push(`  - ${hit.relPath}：${hit.label} × ${hit.count}（例 ${JSON.stringify(hit.sample)}）`)
+      }
+    } else {
+      evidence.push('判据 ①：0 命中 ✔')
+    }
+    if (verdict.substringOnly.length > 0) {
+      evidence.push(`[漏法探针] 判据②找到、判据①没找到 ${verdict.substringOnly.length} 处 —— 请目视确认是否为"形态漏"：`)
+      for (const item of verdict.substringOnly.slice(0, 20)) {
+        evidence.push(`  - ${item.relPath}：${JSON.stringify(item.name)} 出现的形态不在判据①的设想内`)
+      }
+      if (verdict.substringOnly.length > 20) evidence.push(`  …（其余 ${verdict.substringOnly.length - 20} 处省略）`)
+    } else {
+      evidence.push('漏法探针：两套判据结果完全一致 ✔（不存在"形态漏"）')
+    }
+    if (verdict.codenameHits.length > 0) {
+      const byName = new Map()
+      for (const item of verdict.codenameHits) byName.set(item.name, (byName.get(item.name) ?? 0) + item.count)
+      const total = [...byName.values()].reduce((a, b) => a + b, 0)
+      evidence.push(
+        `[info] 内部协作代号残留 ${verdict.codenameHits.length} 处 / 共 ${total} 次，分布在 ${new Set(verdict.codenameHits.map((item) => item.relPath)).size} 个文件：${[...byName.entries()].map(([name, count]) => `${name}×${count}`).join(' ')}`,
+      )
+      evidence.push('  代号对外部读者是噪声，但**不在本次冻结词表内**，故本项不判 FAIL；归属与清理由主脑派单（各行属主见 README）。')
+    }
+    evidence.push('依据: 契约 §49.1（统一占位词表，冻结）+ §48.5（扫描五条标准）。')
+    report(
+      'X7',
+      '本仓库不含私有标识（§49.1 词表：本机路径 / 私有环境变量名 / 私有 provider 名）',
+      verdict.hits.length > 0 ? 'FAIL' : 'PASS',
+      evidence,
+    )
+  }
+
 // ── R1：回滚备件（与插件目录无关，故放在插件存在性分支之外，始终检查） ──────
 //
-// 为什么要有这一项：上一轮我把"备份不存在"当成**结论**写进 README，而它其实只是
-// 一个**时间点采样**（该文件由 W1 在 05:16:08 创建，晚于我的探针）。
+// 为什么要有这一项：早期版本把"备份不存在"当成**结论**写进 README，而它其实只是
+// 一个**时间点采样**（该文件是在那次探针之后才被创建出来的）。
 // 教训是：对别人拥有的文件，绝不能在交付物里硬编码"存在/不存在"，必须每次运行时现场判定。
 // 现在这项既覆盖"当前是否存在"，也覆盖"真的缺失时是否 FAIL"。
 {

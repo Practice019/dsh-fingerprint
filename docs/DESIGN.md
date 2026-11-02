@@ -2,7 +2,8 @@
 
 > 本文档是一个 AI 多代理协作过程的**原始记录**，不是写给新用户的使用手册（使用请看仓库根目录 README.md）。
 > 它记录了 43 个章节（§0–§42）的设计决策、**每一次判断的证据**、以及被推翻的判断。
-> 机器相关路径已替换为占位符（`<plugin-dir>`、`$DSH_HOME`、`<DSH-install>` 等）。
+> 机器相关路径已替换为占位符（`<plugin-dir>`、`$DSH_HOME`、`<DSH-install>` 等）；
+> 操作者私有的 provider / 模型 / 凭据 ref 名也已替换为通用代称（`provider-a`、`example/text-image`、`API_KEY_A` 等）。
 
 ## 术语表
 
@@ -100,7 +101,7 @@ window.__ModuleLoader__.load({
 ### 2.5 致命陷阱（必须绕开）
 **pi-ai 的 `listModels` 在无 key 时返回 `[]`**（`MISSING_CREDENTIAL` → `return []`）。
 ⇒ **模型列表必须以 settings 里的 `models` 数组为主来源**，`ctx.llm.listModels()` 只作补充。
-（本机 `test` provider 指向 `http://127.0.0.1:7860/v1`，很可能没在跑；若只用 `listModels` 它会凭空消失。）
+（本机 `provider-b` 指向 `http://127.0.0.1:7860/v1`，很可能没在跑；若只用 `listModels` 它会凭空消失。）
 
 ### 2.6 密钥边界
 明文 key **只能在宿主侧取到**；前端 `credentials.describe()` 只回 `{configured,source?,writable}`。
@@ -199,11 +200,11 @@ export function aggregateRounds(rounds)   // rounds: [{ analysis, error }]
 { "ok": true,
   "detector": { "ready": true, "builtAt": "2026-10-24T03:33:06Z", "bankModelCount": 42 },
   "providers": [
-    { "provider": "my", "displayName": "my", "active": true,
+    { "provider": "provider-a", "displayName": "provider-a", "active": true,
       "api": "openai-completions", "baseURL": "http://<provider-host>:7863/v1",
-      "credentialRef": "MY_API_KEY", "credentialAvailable": true,
+      "credentialRef": "API_KEY_A", "credentialAvailable": true,
       "dormant": false, "error": null,
-      "models": [ { "id": "loomy/DeepSeek-V4.1-Flash", "name": "loomy/DeepSeek-V4.1-Flash",
+      "models": [ { "id": "example/text-image", "name": "example/text-image",
                     "source": "config", "contextWindow": 1048576, "maxTokens": 384000,
                     "input": ["text","image"] } ] } ] }
 ```
@@ -214,10 +215,10 @@ export function aggregateRounds(rounds)   // rounds: [{ analysis, error }]
 { "ok": true, "runId": "r-1", "phase": "running|done|cancelled|failed",
   "startedAt": 1762000000000, "finishedAt": null,
   "options": { "rounds": 3, "count": 3, "parallel": 2, "strict": false },
-  "tasks": [ { "provider":"my", "model":"loomy/...", "round": 2, "totalRounds": 3,
+  "tasks": [ { "provider":"provider-a", "model":"example/...", "round": 2, "totalRounds": 3,
                "state":"queued|waiting|streaming|complete|truncated|failed",
                "count": 287, "expectedCount": 300, "firstByteMs": 412, "error": null } ],
-  "results": [ { "provider":"my", "model":"loomy/...", "aggregate": { /* §4.3 结构 */ } } ] }
+  "results": [ { "provider":"provider-a", "model":"example/...", "aggregate": { /* §4.3 结构 */ } } ] }
 ```
 
 ## 6. 环境事实
@@ -385,7 +386,7 @@ evidence: "Consecutive numbers change differently from the language-model replie
 |---|---|---|
 | `ctx.settings.describe()` 第三方插件能否调 | `true`，**23 个 ns**（含 `llm-pi-ai` / `llm-deepseek` / `llm-deepseek-account` / `agent-default-model`） | **不降级**，`listTargets` 走主路径 |
 | `ctx.get('webServer')?.register` | `typeof === 'function'`，ctor = `WebServer` | **不降级**，传输层走 §2.7 主路径 |
-| provider 枚举 | `listProviders()` = `["deepseek-official","deepseek-account","my","test"]` | 与验收预期**完全一致** ✔ |
+| provider 枚举 | `listProviders()` = `["deepseek-official","deepseek-account","provider-a","provider-b"]` | 与验收预期**完全一致** ✔ |
 
 `configurableProviderIds` 共 **45** = 4 个已注册 + **41 个休眠目录项**（pi-ai 目录里 openai/anthropic/google/… 全为 `declared:true` 未注册）。
 冒烟 `runs=7`，`errors={}`（零异常）。重组合实测耗时 **约 8 秒**，app 健康未重启。
@@ -455,10 +456,10 @@ providers[] = {
   "startedAt": 0, "finishedAt": null,
   "options": { "rounds":3, "count":3, "parallel":2, "strict":false, "timeoutSec":120, "gapSec":0 },
   "error": null,
-  "tasks":   [ { "provider":"my", "model":"x", "round":2, "totalRounds":3,
+  "tasks":   [ { "provider":"provider-a", "model":"x", "round":2, "totalRounds":3,
                  "state":"queued|waiting|streaming|complete|truncated|failed",
                  "count":287, "expectedCount":300, "firstByteMs":412, "error":null } ],
-  "results": [ { "provider":"my", "model":"x", "aggregate": { /* §9.1 结构 */ } } ] }
+  "results": [ { "provider":"provider-a", "model":"x", "aggregate": { /* §9.1 结构 */ } } ] }
 ```
 - **`error: string | null`** —— **run 级**致命原因（`phase==='failed'` 时非空），是**人类可读字符串**，不是对象。
   ⚠️ 不要与 §5 的**请求级**统一失败体 `{ok:false,error:{code,message}}` 混淆，两者层次不同。
@@ -468,7 +469,7 @@ providers[] = {
 ```json
 { "ok": true, "runId": "r-1", "phase": "done",
   "startedAt": 0, "finishedAt": 0, "options": { },
-  "targets": [ { "provider": "my", "model": "x",
+  "targets": [ { "provider": "provider-a", "model": "x",
                  "rounds": [ { "challenges": [ ], "samples": [ ], "analysis": { }, "error": null } ],
                  "aggregate": { } } ] }
 ```
@@ -570,19 +571,19 @@ handler 内**先调 `invalidateTargets()`，再 `listTargets(ctx)`** —— 用�
 
 ```
 GET /fingerprint/status  → 200 {"ok":true,"detector":{"ready":true,"builtAt":"2026-10-27T13:02:50.758637+08:00","bankModelCount":64,"cachePath":"%LOCALAPPDATA%\\lmfpd\\data.bin"}}
-GET /fingerprint/targets → 200  providers 总数 45，active 4 = deepseek-official, deepseek-account, my, test
+GET /fingerprint/targets → 200  providers 总数 45，active 4 = deepseek-official, deepseek-account, provider-a, provider-b
 ```
 
 | provider | models | credentialRef | available | refSource |
 |---|---|---|---|---|
 | `deepseek-official` | 2 | **`DEEPSEEK_API_KEY`** | `false` | `profile` |
 | `deepseek-account` | 2 | `DEEPSEEK_ACCOUNT_API_KEY` | `false` | `guessed` |
-| `my` | 3 | `MY_API_KEY` | `true` | `profile` |
-| `test` | 1 | `TEST_API_KEY` | `true` | `profile` |
+| `provider-a` | 3 | `API_KEY_A` | `true` | `profile` |
+| `provider-b` | 1 | `API_KEY_B` | `true` | `profile` |
 
 **§14.2 的修复被活证据证实**：`deepseek-official` 解析出 `DEEPSEEK_API_KEY`（正确约定值），而非兜底会猜的 `DEEPSEEK_OFFICIAL_API_KEY`。
 
-真实模型链路（W7 实测）：`my / workbuddy/deepseek-v4.1-flash` → `decision=scored`、`prediction=deepseek-v4.1-flash-1017`、`probability=0.9096`；3 个样本 `complete 322/322` / `truncated 323/323` / `complete 319/319`，35.2 s。
+真实模型链路（W7 实测）：`provider-a / acme/text-large` → `decision=scored`、`prediction=example-v1-flash-0101`、`probability=0.9096`；3 个样本 `complete 322/322` / `truncated 323/323` / `complete 319/319`，35.2 s。
 
 ### 15.2 ⚠️ 真机数据暴露的缺陷：`deepseek-account` 假阴性（W5 必须修）
 实测 `deepseek-account`：`refSource=guessed`、`available=false`，**但它的 `models` 有 2 条且 `source='catalog'`**。
@@ -626,12 +627,12 @@ W7 报告 `lib/probe.js` 里 0 处 `getDetector`。**主脑实测：5 处，含 
 ## 16. 主脑实测：凭据形状与 `nativeAuth`（回答 W5 的第 2 / 4 问）
 
 ### 16.1 `deepseek-official` 的 `available=false` 是**正确**的，无 bug
-主脑**只读键名、不打印任何值**地检查了 `$DSH_HOME/.credentials.yaml`（671 B）：
+主脑**只读键名、不打印任何值**地检查了 `$DSH_HOME/.credentials.yaml`（大小略）：
 - **`DEEPSEEK_API_KEY` 出现行数 = 0** ⇒ 该 key 确实未配置
-- 库中实际存在的 ref 名：`MY_API_KEY`、`MY1_API_KEY`、`TEST_API_KEY`
-- 另有两条 OAuth 形状记录：`client-connection/browser-session`、`deepseek-account-platform/device`、`deepseek-account-platform/default`（含 `token` / `issuer`）
+- 库中实际存在的 ref 名：3 个 key ref，后缀各不相同（记作 `API_KEY_A` / `API_KEY_B` / `API_KEY_C`）
+- 另有三条 OAuth 形状记录：`client-connection/<session>`、`<provider>/device`、`<provider>/default`（含 `token` / `issuer`）
 
-⇒ 这同时解释了为什么只有 `my` / `test` 能跑真实检测（它们的 ref 有值），以及 `deepseek-official` 报 `false` 属实。**不是 `hasCredential` 的缺陷。**
+⇒ 这同时解释了为什么只有 `provider-a` / `provider-b` 能跑真实检测（它们的 ref 有值），以及 `deepseek-official` 报 `false` 属实。**不是 `hasCredential` 的缺陷。**
 
 ### 16.2 W5 的 Q2 假设被**证实**：`nativeAuth` 在本机是 `undefined`
 主脑 grep 了 `dsh-deepseek-account`、`dsh-deepseek-account-platform`、`dsh-llm-deepseek-account` 三个包 → **`nativeAuth` 字面量 0 命中**。
@@ -921,8 +922,8 @@ W3 跑全量时出现 3 条失败：`FIX-2`（W7 的 `lib/index.js`）×2 与 `F
 |---|---|---|---|---|---|---|
 | `deepseek-official` | 2 | `DEEPSEEK_API_KEY` | **`false`** | `profile` | `true` | `ok` |
 | `deepseek-account` | 2 | `DEEPSEEK_ACCOUNT_API_KEY` | **`null`** | `guessed` | `true` | `ok` |
-| `my` | 3 | `MY_API_KEY` | **`true`** | `profile` | `true` | `ok` |
-| `test` | 1 | `TEST_API_KEY` | **`true`** | `profile` | `true` | `ok` |
+| `provider-a` | 3 | `API_KEY_A` | **`true`** | `profile` | `true` | `ok` |
+| `provider-b` | 1 | `API_KEY_B` | **`true`** | `profile` | `true` | `ok` |
 
 `/status` 200、`bankModelCount=64`、providers 45 / active 4 未变。
 
@@ -1139,11 +1140,11 @@ P1 与 P2 都只落在两个文件：`lib/index.js`（W7）+ `client.js`（W6）
   v: 1,
   ts: "2026-11-02T06:30:00.000Z",        // ISO
   runId: "r-7",
-  provider: "my",
-  model: "loomy/DeepSeek-V4.1-Flash",
+  provider: "provider-a",
+  model: "example/text-image",
   decision: "scored",                    // §9.1 的 4 值
-  prediction: "deepseek-v4.1-flash-1017",
-  predictionName: "DeepSeek V4.1 Flash",
+  prediction: "example-v1-flash-0101",
+  predictionName: "Example V1 Flash",
   family: "deepseek",
   familyName: "DeepSeek",
   probability: 0.9096,                   // 可为 null

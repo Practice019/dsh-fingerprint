@@ -65,11 +65,11 @@ function deepseekDescriptor(profile) {
   return { ns: 'llm-deepseek', value: profile }
 }
 
-/** 常用的三个模型配置。 */
+/** 示例模型配置（占位 id，非任何真实厂商 / 网关）。 */
 const THREE_MODELS = [
-  { id: 'workbuddy/deepseek-v4.1-flash', name: 'workbuddy/deepseek-v4.1-flash', contextWindow: 1000000, maxTokens: 128000 },
-  { id: 'loomy/DeepSeek-V4.1-Flash', name: 'loomy/DeepSeek-V4.1-Flash', contextWindow: 1048576, maxTokens: 384000, input: ['text', 'image'] },
-  { id: 'workbuddy-intl/deepseek-v4.1-flash', name: 'workbuddy-intl/deepseek-v4.1-flash', contextWindow: 1000000, maxTokens: 128000 },
+  { id: 'acme/text-large', name: 'acme/text-large', contextWindow: 1000000, maxTokens: 128000 },
+  { id: 'example/text-image', name: 'example/text-image', contextWindow: 1048576, maxTokens: 384000, input: ['text', 'image'] },
+  { id: 'acme-intl/text-large', name: 'acme-intl/text-large', contextWindow: 1000000, maxTokens: 128000 },
 ]
 
 // ── 1. 并集 ────────────────────────────────────────────────────────────────
@@ -78,15 +78,15 @@ test('1) 目录条目 + 已注册路由取并集，同一 provider 不重复', a
   invalidateTargets()
   const { ctx } = makeCtx({
     directory: [
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
-      { provider: 'test', displayName: 'test', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'test'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
+      { provider: 'provider_b', displayName: 'provider_b', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_b'] },
     ],
     registered: [
-      { id: 'my', name: 'my' }, // 与目录重复 —— 不得产生第二行
+      { id: 'provider_a', name: 'provider_a' }, // 与目录重复 —— 不得产生第二行
       { id: 'deepseek-official', name: 'DeepSeek 官方' }, // 只在注册侧出现
     ],
     describe: [
-      piAiDescriptor({ my: { models: [] }, test: { models: [] } }),
+      piAiDescriptor({ provider_a: { models: [] }, provider_b: { models: [] } }),
       deepseekDescriptor({ models: [] }),
     ],
   })
@@ -95,7 +95,7 @@ test('1) 目录条目 + 已注册路由取并集，同一 provider 不重复', a
 
   assert.deepEqual(
     providers.map((p) => p.provider),
-    ['my', 'test', 'deepseek-official'],
+    ['provider_a', 'provider_b', 'deepseek-official'],
     '目录顺序在前，仅注册侧的新 provider 追加在后，重复项只出现一次',
   )
   assert.equal(providers.length, 3)
@@ -107,19 +107,19 @@ test('2) active / dormant 判定正确，休眠项也出现在结果里', async 
   invalidateTargets()
   const { ctx, calls } = makeCtx({
     directory: [
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
       { provider: 'openai', displayName: 'OpenAI', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'openai'], declared: true },
       { provider: 'anthropic', displayName: 'Anthropic', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'anthropic'], declared: true },
     ],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { models: [] }, openai: { models: [] }, anthropic: { models: [] } })],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { models: [] }, openai: { models: [] }, anthropic: { models: [] } })],
   })
 
   const { providers } = await listTargets(ctx)
   const byProvider = new Map(providers.map((p) => [p.provider, p]))
 
-  assert.equal(byProvider.get('my').active, true)
-  assert.equal(byProvider.get('my').dormant, false)
+  assert.equal(byProvider.get('provider_a').active, true)
+  assert.equal(byProvider.get('provider_a').dormant, false)
 
   assert.equal(byProvider.get('openai').active, false)
   assert.equal(byProvider.get('openai').dormant, true)
@@ -129,7 +129,7 @@ test('2) active / dormant 判定正确，休眠项也出现在结果里', async 
   assert.equal(providers.length, 3)
 
   // catalog 只该问 active 的
-  assert.deepEqual(calls.listModels, ['my'], '休眠 provider 不得触发 listModels')
+  assert.deepEqual(calls.listModels, ['provider_a'], '休眠 provider 不得触发 listModels')
 })
 
 // ── 3. 核心：无 key 时 listModels 返回 []，config 模型必须还在 ──────────────
@@ -138,12 +138,12 @@ test('3) 核心：settings 有 3 个 model 而 listModels 返回 [] → 3 个 co
   invalidateTargets()
   const { ctx, calls } = makeCtx({
     directory: [
-      { provider: 'test', displayName: 'test', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'test'] },
+      { provider: 'provider_b', displayName: 'provider_b', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_b'] },
     ],
-    registered: [{ id: 'test', name: 'test' }],
+    registered: [{ id: 'provider_b', name: 'provider_b' }],
     describe: [
       piAiDescriptor({
-        test: { api: 'openai-completions', baseURL: 'http://127.0.0.1:7860/v1', apiKeyEnv: 'TEST_API_KEY', models: THREE_MODELS },
+        provider_b: { api: 'openai-completions', baseURL: 'http://127.0.0.1:7860/v1', apiKeyEnv: 'PROVIDER_B_API_KEY', models: THREE_MODELS },
       }),
     ],
     // 模拟 pi-ai 无 key 的行为：MISSING_CREDENTIAL → return []
@@ -151,7 +151,7 @@ test('3) 核心：settings 有 3 个 model 而 listModels 返回 [] → 3 个 co
   })
 
   const { providers } = await listTargets(ctx)
-  const target = providers.find((p) => p.provider === 'test')
+  const target = providers.find((p) => p.provider === 'provider_b')
 
   assert.equal(target.models.length, 3, '不能因为 listModels 返回空就丢掉 settings 里的模型')
   assert.deepEqual(
@@ -165,7 +165,7 @@ test('3) 核心：settings 有 3 个 model 而 listModels 返回 [] → 3 个 co
   assert.equal(target.models[1].contextWindow, 1048576)
   assert.equal(target.models[1].maxTokens, 384000)
 
-  assert.deepEqual(calls.listModels, ['test'], 'active provider 仍会尝试一次 catalog')
+  assert.deepEqual(calls.listModels, ['provider_b'], 'active provider 仍会尝试一次 catalog')
 })
 
 // ── 4. listModels 抛错 ────────────────────────────────────────────────────
@@ -174,10 +174,10 @@ test('4) listModels 抛错 → config 模型照常在，整个调用不抛异常
   invalidateTargets()
   const { ctx } = makeCtx({
     directory: [
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
     ],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { models: THREE_MODELS } })],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { models: THREE_MODELS } })],
     listModels: async () => {
       throw new Error('connect ECONNREFUSED 127.0.0.1:7860')
     },
@@ -188,7 +188,7 @@ test('4) listModels 抛错 → config 模型照常在，整个调用不抛异常
     result = await listTargets(ctx)
   })
 
-  const target = result.providers.find((p) => p.provider === 'my')
+  const target = result.providers.find((p) => p.provider === 'provider_a')
   assert.equal(target.models.length, 3)
   assert.ok(target.models.every((m) => m.source === 'config'))
   assert.equal(target.error, null, 'catalog 失败不算 provider 级错误')
@@ -196,21 +196,21 @@ test('4) listModels 抛错 → config 模型照常在，整个调用不抛异常
 
 // ── 5. settingsPath 两种形状 ───────────────────────────────────────────────
 
-test('5) settingsPath 下钻：["providers","my"] 与 [] 两种形状都正确', async () => {
+test('5) settingsPath 下钻：["providers","provider_a"] 与 [] 两种形状都正确', async () => {
   invalidateTargets()
   const { ctx } = makeCtx({
     directory: [
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
       { provider: 'deepseek-official', displayName: 'DeepSeek 官方', settingsNs: 'llm-deepseek', settingsPath: [] },
     ],
     registered: [
-      { id: 'my', name: 'my' },
+      { id: 'provider_a', name: 'provider_a' },
       { id: 'deepseek-official', name: 'DeepSeek 官方' },
     ],
     describe: [
-      // shape A：嵌套在 value.providers.my
+      // shape A：嵌套在 value.providers.provider_a
       piAiDescriptor({
-        my: { api: 'openai-completions', baseURL: 'http://198.51.100.7:7863/v1', models: THREE_MODELS },
+        provider_a: { api: 'openai-completions', baseURL: 'http://198.51.100.7:7863/v1', models: THREE_MODELS },
       }),
       // shape B：profile 就是 section 根
       deepseekDescriptor({
@@ -225,9 +225,9 @@ test('5) settingsPath 下钻：["providers","my"] 与 [] 两种形状都正确',
   const byProvider = new Map(providers.map((p) => [p.provider, p]))
 
   // shape A
-  assert.equal(byProvider.get('my').api, 'openai-completions')
-  assert.equal(byProvider.get('my').baseURL, 'http://198.51.100.7:7863/v1')
-  assert.equal(byProvider.get('my').models.length, 3)
+  assert.equal(byProvider.get('provider_a').api, 'openai-completions')
+  assert.equal(byProvider.get('provider_a').baseURL, 'http://198.51.100.7:7863/v1')
+  assert.equal(byProvider.get('provider_a').models.length, 3)
 
   // shape B（settingsPath 为空 → 不下钻）
   assert.equal(byProvider.get('deepseek-official').api, 'deepseek-completions')
@@ -267,18 +267,18 @@ test('5b) settings 缺 ns / 形状怪 → 不当作错误，只是没有 config 
 
 test('6) credentialRef：profile.apiKeyEnv 优先，缺失时回退 deriveKeyRef', async () => {
   invalidateTargets()
-  assert.equal(deriveKeyRef('my'), 'MY_API_KEY')
+  assert.equal(deriveKeyRef('provider_a'), 'PROVIDER_A_API_KEY')
   assert.equal(deriveKeyRef('deepseek-official'), 'DEEPSEEK_OFFICIAL_API_KEY')
   assert.equal(deriveKeyRef('a.b c-d'), 'A_B_C_D_API_KEY')
 
   const { ctx } = makeCtx({
     directory: [
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
       { provider: 'deepseek-official', displayName: 'DeepSeek 官方', settingsNs: 'llm-deepseek', settingsPath: [] },
     ],
     registered: [],
     describe: [
-      piAiDescriptor({ my: { apiKeyEnv: 'MY_CUSTOM_KEY', models: [] } }),
+      piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_CUSTOM_KEY', models: [] } }),
       deepseekDescriptor({ models: [] }), // 无 apiKeyEnv
     ],
   })
@@ -286,8 +286,8 @@ test('6) credentialRef：profile.apiKeyEnv 优先，缺失时回退 deriveKeyRef
   const { providers } = await listTargets(ctx)
   const byProvider = new Map(providers.map((p) => [p.provider, p]))
 
-  assert.equal(byProvider.get('my').credentialRef, 'MY_CUSTOM_KEY', 'profile 里有就用它')
-  assert.equal(byProvider.get('my').credentialRefSource, 'profile')
+  assert.equal(byProvider.get('provider_a').credentialRef, 'PROVIDER_A_CUSTOM_KEY', 'profile 里有就用它')
+  assert.equal(byProvider.get('provider_a').credentialRefSource, 'profile')
   assert.equal(
     byProvider.get('deepseek-official').credentialRef,
     'DEEPSEEK_OFFICIAL_API_KEY',
@@ -304,9 +304,9 @@ test('7) credentialAvailable 只回布尔，返回体里绝不含 key 明文', a
   // (a) credentials 有值 → true，但值不外泄
   invalidateTargets()
   const { ctx: ctxWithKey } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: THREE_MODELS } })],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: THREE_MODELS } })],
     credentials: { resolve: async () => ({ value: SECRET, source: 'store' }) },
   })
 
@@ -321,10 +321,10 @@ test('7) credentialAvailable 只回布尔，返回体里绝不含 key 明文', a
   // (b) credentials 没有 → 回退 launchEnvironment 命中 → true，值仍不外泄
   invalidateTargets()
   const { ctx: ctxWithEnv } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: THREE_MODELS } })],
-    launchEnvironment: { get: (ref) => (ref === 'MY_API_KEY' ? { value: SECRET } : undefined) },
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: THREE_MODELS } })],
+    launchEnvironment: { get: (ref) => (ref === 'PROVIDER_A_API_KEY' ? { value: SECRET } : undefined) },
   })
 
   const withEnv = await listTargets(ctxWithEnv)
@@ -334,9 +334,9 @@ test('7) credentialAvailable 只回布尔，返回体里绝不含 key 明文', a
   // (c) 两处都没有 → false，且同样不含明文
   invalidateTargets()
   const { ctx: ctxNoKey } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: THREE_MODELS } })],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: THREE_MODELS } })],
     credentials: { resolve: async () => undefined },
     launchEnvironment: { get: () => undefined },
   })
@@ -344,7 +344,7 @@ test('7) credentialAvailable 只回布尔，返回体里绝不含 key 明文', a
   const noKey = await listTargets(ctxNoKey)
   assert.equal(noKey.providers[0].credentialAvailable, false)
   assert.equal(JSON.stringify(noKey).includes(SECRET), false)
-  assert.equal(JSON.stringify(noKey).includes('MY_API_KEY'), true, '引用名本身是配置，可以出现')
+  assert.equal(JSON.stringify(noKey).includes('PROVIDER_A_API_KEY'), true, '引用名本身是配置，可以出现')
 })
 
 // ── 8. 错误隔离 ───────────────────────────────────────────────────────────
@@ -362,13 +362,13 @@ test('8) 单个 provider 抛错 → 其余 provider 正常，出错者带 error'
 
   const { ctx } = makeCtx({
     directory: [
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
       evil,
       { provider: 'bad', displayName: 'bad' }, // 无 settingsNs → 走 deriveKeyRef
       { provider: 'diag', displayName: 'diag', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'diag'], error: '配置诊断：缺少 baseURL' },
     ],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { models: THREE_MODELS }, diag: { models: [] } })],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { models: THREE_MODELS }, diag: { models: [] } })],
     credentials: {
       resolve: async (ref) => {
         if (ref === 'BAD_API_KEY') throw new Error('resolve exploded')
@@ -387,8 +387,8 @@ test('8) 单个 provider 抛错 → 其余 provider 正常，出错者带 error'
   const byProvider = new Map(result.providers.map((p) => [p.provider, p]))
 
   // 正常的照常
-  assert.equal(byProvider.get('my').models.length, 3)
-  assert.equal(byProvider.get('my').error, null)
+  assert.equal(byProvider.get('provider_a').models.length, 3)
+  assert.equal(byProvider.get('provider_a').error, null)
 
   // 抛错 getter → 捕获成 error 字符串，其余字段退化为安全默认
   assert.match(byProvider.get('evil').error, /boom-settingsNs/)
@@ -424,11 +424,11 @@ test('8b) 整个 llm / settings 服务缺失也不抛异常', async () => {
 test('9) input 模态被正确透传，catalog 的 inputModalities 也映射进来', async () => {
   invalidateTargets()
   const { ctx } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
     describe: [
       piAiDescriptor({
-        my: {
+        provider_a: {
           models: [
             { id: 'with-image', name: 'with-image', input: ['text', 'image'] },
             { id: 'text-only', name: 'text-only', input: ['text'] },
@@ -438,8 +438,8 @@ test('9) input 模态被正确透传，catalog 的 inputModalities 也映射进�
       }),
     ],
     listModels: async () => [
-      { provider: 'my', id: 'catalog-only', name: 'catalog-only', inputModalities: ['text', 'image'] },
-      { provider: 'my', id: 'with-image', name: 'with-image', inputModalities: ['text', 'image'] }, // 与 config 重复
+      { provider: 'provider_a', id: 'catalog-only', name: 'catalog-only', inputModalities: ['text', 'image'] },
+      { provider: 'provider_a', id: 'with-image', name: 'with-image', inputModalities: ['text', 'image'] }, // 与 config 重复
     ],
   })
 
@@ -503,23 +503,23 @@ test('11) nativeAuth.env 命中 → credentialRef 取该值且 credentialRefSour
   const { ctx } = makeCtx({
     directory: [
       {
-        provider: 'my',
-        displayName: 'my',
+        provider: 'provider_a',
+        displayName: 'provider_a',
         settingsNs: 'llm-pi-ai',
-        settingsPath: ['providers', 'my'],
-        nativeAuth: { env: ['MY_PROVIDER_KEY', 'MY_FALLBACK_KEY'] },
+        settingsPath: ['providers', 'provider_a'],
+        nativeAuth: { env: ['PROVIDER_A_KEY', 'PROVIDER_A_FALLBACK_KEY'] },
       },
     ],
-    registered: [{ id: 'my', name: 'my' }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
     // profile 里没有 apiKeyEnv → 落到第二级
-    describe: [piAiDescriptor({ my: { models: [] } })],
-    credentials: { resolve: async (ref) => (ref === 'MY_PROVIDER_KEY' ? { value: 'secret' } : undefined) },
+    describe: [piAiDescriptor({ provider_a: { models: [] } })],
+    credentials: { resolve: async (ref) => (ref === 'PROVIDER_A_KEY' ? { value: 'secret' } : undefined) },
   })
 
   const { providers } = await listTargets(ctx)
   const target = providers[0]
 
-  assert.equal(target.credentialRef, 'MY_PROVIDER_KEY', 'nativeAuth.env 里取第一个非空 ref')
+  assert.equal(target.credentialRef, 'PROVIDER_A_KEY', 'nativeAuth.env 里取第一个非空 ref')
   assert.equal(target.credentialRefSource, 'nativeAuth')
   assert.equal(target.credentialAvailable, true)
 })
@@ -529,15 +529,15 @@ test('12) profile.apiKeyEnv 优先于 nativeAuth.env，且 source === "profile"'
   const { ctx } = makeCtx({
     directory: [
       {
-        provider: 'my',
-        displayName: 'my',
+        provider: 'provider_a',
+        displayName: 'provider_a',
         settingsNs: 'llm-pi-ai',
-        settingsPath: ['providers', 'my'],
+        settingsPath: ['providers', 'provider_a'],
         nativeAuth: { env: ['FROM_NATIVE'] },
       },
     ],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'FROM_PROFILE', models: [] } })],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'FROM_PROFILE', models: [] } })],
     credentials: { resolve: async () => undefined },
   })
 
@@ -602,9 +602,9 @@ test('13) credentialAvailable 三态：true / false / null 都能构造出来', 
   // (a) true —— 确定 ref（来自 profile）且解析得到值
   invalidateTargets()
   const { ctx: ctxTrue } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: [] } })],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: [] } })],
     credentials: { resolve: async () => ({ value: 'secret' }) },
   })
   assert.equal((await listTargets(ctxTrue)).providers[0].credentialAvailable, true)
@@ -612,9 +612,9 @@ test('13) credentialAvailable 三态：true / false / null 都能构造出来', 
   // (b) false —— 确定 ref（来自 profile），但确实没有值
   invalidateTargets()
   const { ctx: ctxFalse } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: [] } })],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: [] } })],
     credentials: { resolve: async () => undefined },
     launchEnvironment: { get: () => undefined },
   })
@@ -797,10 +797,10 @@ test('17) oauth 用 truthy 判定：字符串 "oauth" 算账号路由，假值�
 test('18) FIX-10-A：listModels 抛错 → catalogState=error → credentialAvailable 为 null（不是 false）', async () => {
   invalidateTargets()
   const { ctx, calls } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
     // profile 里**没有** apiKeyEnv ⇒ ref 只能靠猜（guessed）
-    describe: [piAiDescriptor({ my: { models: THREE_MODELS } })],
+    describe: [piAiDescriptor({ provider_a: { models: THREE_MODELS } })],
     listModels: async () => {
       throw new Error('connect ECONNREFUSED 127.0.0.1:7860')
     },
@@ -810,7 +810,7 @@ test('18) FIX-10-A：listModels 抛错 → catalogState=error → credentialAvai
   const { providers } = await listTargets(ctx)
   const target = providers[0]
 
-  assert.deepEqual(calls.listModels, ['my'], '确实问过 catalog')
+  assert.deepEqual(calls.listModels, ['provider_a'], '确实问过 catalog')
   assert.equal(target.credentialRefSource, 'guessed')
   assert.equal(target.settingsOk, true, 'settings 本身是好的')
   assert.equal(target.catalogState, 'error', 'FIX-10：异常必须被记为 error，不能静默吞成空数组')
@@ -832,9 +832,9 @@ test('19) FIX-10-B：settings.describe() 瞬时失败 → settingsOk=false → �
   const ctx = {
     llm: {
       listConfigurableProviders: () => [
-        { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+        { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
       ],
-      listProviders: () => [{ id: 'my', name: 'my' }],
+      listProviders: () => [{ id: 'provider_a', name: 'provider_a' }],
       listModels: async () => [], // 同时也没有 catalog 旁证
     },
     settings: {
@@ -865,10 +865,10 @@ test('19) FIX-10-B：settings.describe() 瞬时失败 → settingsOk=false → �
 
 test('20) FIX-10：settingsOk 与 catalogState 是两条独立通路，任一丢失都判 null；都好才判 false', async () => {
   const dirEntry = {
-    provider: 'my',
-    displayName: 'my',
+    provider: 'provider_a',
+    displayName: 'provider_a',
     settingsNs: 'llm-pi-ai',
-    settingsPath: ['providers', 'my'],
+    settingsPath: ['providers', 'provider_a'],
   }
 
   // (a) settings 挂了，但 catalog 有模型 ⇒ 另一条通路把结论救回 null
@@ -876,8 +876,8 @@ test('20) FIX-10：settingsOk 与 catalogState 是两条独立通路，任一丢
   const ctxCatalogSaves = {
     llm: {
       listConfigurableProviders: () => [dirEntry],
-      listProviders: () => [{ id: 'my', name: 'my' }],
-      listModels: async () => [{ provider: 'my', id: 'c1', name: 'c1' }],
+      listProviders: () => [{ id: 'provider_a', name: 'provider_a' }],
+      listModels: async () => [{ provider: 'provider_a', id: 'c1', name: 'c1' }],
     },
     settings: {
       describe: () => {
@@ -894,8 +894,8 @@ test('20) FIX-10：settingsOk 与 catalogState 是两条独立通路，任一丢
   invalidateTargets()
   const { ctx: ctxBothHealthy } = makeCtx({
     directory: [dirEntry],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { models: [] } })],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { models: [] } })],
     listModels: async () => [],
     credentials: { resolve: async () => undefined },
     launchEnvironment: { get: () => undefined },
@@ -909,10 +909,10 @@ test('20) FIX-10：settingsOk 与 catalogState 是两条独立通路，任一丢
   invalidateTargets()
   const { ctx: ctxGuessedHits } = makeCtx({
     directory: [dirEntry],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { models: [] } })],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { models: [] } })],
     listModels: async () => [],
-    credentials: { resolve: async (ref) => (ref === 'MY_API_KEY' ? { value: 'secret' } : undefined) },
+    credentials: { resolve: async (ref) => (ref === 'PROVIDER_A_API_KEY' ? { value: 'secret' } : undefined) },
   })
   const c = (await listTargets(ctxGuessedHits)).providers[0]
   assert.equal(c.credentialRefSource, 'guessed')
@@ -956,10 +956,10 @@ test('21) FIX-11：抛错 toString 的错误对象 / 抛错 getter 的 descripto
   const { ctx } = makeCtx({
     directory: [
       evilEntry,
-      { provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] },
+      { provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] },
     ],
     registered: [],
-    describe: [evilDescriptor, piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: [] } })],
+    describe: [evilDescriptor, piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: [] } })],
   })
 
   let result
@@ -978,11 +978,11 @@ test('21) FIX-11：抛错 toString 的错误对象 / 抛错 getter 的 descripto
 
   // (b) 坏 descriptor 被跳过，好的那个仍被正常处理
   assert.equal(
-    byProvider.get('my').credentialRefSource,
+    byProvider.get('provider_a').credentialRefSource,
     'profile',
     '抛错 getter 的 descriptor 被跳过后，后续 descriptor 仍须正常解析',
   )
-  assert.equal(byProvider.get('my').credentialRef, 'MY_API_KEY')
+  assert.equal(byProvider.get('provider_a').credentialRef, 'PROVIDER_A_API_KEY')
 })
 
 // ── 22. FIX-12：缓存返回值冻结 ────────────────────────────────────────────
@@ -990,9 +990,9 @@ test('21) FIX-11：抛错 toString 的错误对象 / 抛错 getter 的 descripto
 test('22) FIX-12：缓存返回值被冻结，调用方原地修改不会污染后续命中', async () => {
   invalidateTargets()
   const { ctx } = makeCtx({
-    directory: [{ provider: 'my', displayName: 'my', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'my'] }],
-    registered: [{ id: 'my', name: 'my' }],
-    describe: [piAiDescriptor({ my: { apiKeyEnv: 'MY_API_KEY', models: THREE_MODELS } })],
+    directory: [{ provider: 'provider_a', displayName: 'provider_a', settingsNs: 'llm-pi-ai', settingsPath: ['providers', 'provider_a'] }],
+    registered: [{ id: 'provider_a', name: 'provider_a' }],
+    describe: [piAiDescriptor({ provider_a: { apiKeyEnv: 'PROVIDER_A_API_KEY', models: THREE_MODELS } })],
   })
 
   const first = await listTargets(ctx)
@@ -1017,7 +1017,7 @@ test('22) FIX-12：缓存返回值被冻结，调用方原地修改不会污染�
   // 第二次调用命中缓存 ⇒ 同一份对象，且内容未被污染
   const second = await listTargets(ctx)
   assert.equal(second, first, '命中缓存应返回同一份冻结对象')
-  assert.equal(second.providers[0].displayName, 'my')
+  assert.equal(second.providers[0].displayName, 'provider_a')
   assert.equal(second.providers[0].models[0].id, THREE_MODELS[0].id)
   assert.equal(second.providers.length, 1)
 })

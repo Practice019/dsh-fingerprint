@@ -81,27 +81,27 @@ const denied = (request) => {
 test('FIX-1：parseRunOptions 按 provider+model 去重并保留首次出现顺序', () => {
   const options = parseRunOptions({
     targets: [
-      { provider: 'my', model: 'a' },
-      { provider: 'test', model: 'b' },
-      { provider: 'my', model: 'a' }, // 完全重复
-      { provider: 'my', model: 'c' }, // 同 provider 不同 model：不算重复
-      { provider: 'test', model: 'b' }, // 完全重复
+      { provider: 'provider_a', model: 'a' },
+      { provider: 'provider_b', model: 'b' },
+      { provider: 'provider_a', model: 'a' }, // 完全重复
+      { provider: 'provider_a', model: 'c' }, // 同 provider 不同 model：不算重复
+      { provider: 'provider_b', model: 'b' }, // 完全重复
     ],
     rounds: 2,
   });
   assert.deepEqual(options.targets, [
-    { provider: 'my', model: 'a' },
-    { provider: 'test', model: 'b' },
-    { provider: 'my', model: 'c' },
+    { provider: 'provider_a', model: 'a' },
+    { provider: 'provider_b', model: 'b' },
+    { provider: 'provider_a', model: 'c' },
   ]);
 });
 
 test('FIX-1：buildTasks 计数 = 去重后目标数 × 轮数，totalRounds 正确，索引全覆盖', () => {
   const { targets } = parseRunOptions({
     targets: [
-      { provider: 'my', model: 'a' },
-      { provider: 'my', model: 'a' }, // 重复
-      { provider: 'test', model: 'b' },
+      { provider: 'provider_a', model: 'a' },
+      { provider: 'provider_a', model: 'a' }, // 重复
+      { provider: 'provider_b', model: 'b' },
     ],
     rounds: 3,
   });
@@ -135,7 +135,7 @@ test('FIX-1：每个 task 只被索引一次（重复 target 不再共享/错位
 
 test('FIX-1：空 targets / 缺字段仍然被拒', () => {
   assert.throws(() => parseRunOptions({ targets: [] }), /targets 不能为空/);
-  assert.throws(() => parseRunOptions({ targets: [{ provider: 'my' }] }), /必须同时给 provider 与 model/);
+  assert.throws(() => parseRunOptions({ targets: [{ provider: 'provider_a' }] }), /必须同时给 provider 与 model/);
   assert.throws(() => parseRunOptions({ targets: [{ model: 'm' }] }), /必须同时给 provider 与 model/);
 });
 
@@ -296,8 +296,8 @@ test('FIX-5：sleep 在等待中被取消也会立即返回；正常情况按时
 test('P1：buildRunItems 把队列展平成 (目标 × 轮次)，按目标、再按轮次升序', () => {
   const { targets } = parseRunOptions({
     targets: [
-      { provider: 'my', model: 'a' },
-      { provider: 'test', model: 'b' },
+      { provider: 'provider_a', model: 'a' },
+      { provider: 'provider_b', model: 'b' },
     ],
     rounds: 3,
   });
@@ -306,13 +306,13 @@ test('P1：buildRunItems 把队列展平成 (目标 × 轮次)，按目标、再
   assert.equal(items.length, 6, '2 目标 × 3 轮');
   assert.deepEqual(
     items.map((item) => `${item.target.provider}#${String(item.round)}`),
-    ['my#1', 'my#2', 'my#3', 'test#1', 'test#2', 'test#3'],
+    ['provider_a#1', 'provider_a#2', 'provider_a#3', 'provider_b#1', 'provider_b#2', 'provider_b#3'],
   );
   assert.ok(items.every((item) => tasks.includes(item.task)), '必须复用 taskIndex 里的同一个 task 对象');
 });
 
 test('P1：单模型 3 轮 + parallel=3 → 峰值并发 3（旧实现恒为 1，轮次被串行）', async () => {
-  const target = { provider: 'my', model: 'a' };
+  const target = { provider: 'provider_a', model: 'a' };
   const { targets } = parseRunOptions({ targets: [target], rounds: 3 });
   const { index } = buildTasks(targets, 3);
   const items = buildRunItems({ targets, options: { rounds: 3 }, taskIndex: index });
@@ -326,7 +326,7 @@ test('P1：单模型 3 轮 + parallel=3 → 峰值并发 3（旧实现恒为 1�
 });
 
 test('P1：parallel=1 → 仍严格顺序（峰值并发 1）', async () => {
-  const { targets } = parseRunOptions({ targets: [{ provider: 'my', model: 'a' }], rounds: 3 });
+  const { targets } = parseRunOptions({ targets: [{ provider: 'provider_a', model: 'a' }], rounds: 3 });
   const { index } = buildTasks(targets, 3);
   const items = buildRunItems({ targets, options: { rounds: 3 }, taskIndex: index });
   const result = await runPool(items, 1, async () => {
@@ -409,8 +409,8 @@ function fakeRun(overrides = {}) {
     phase: 'done',
     options: { rounds: 3, count: 3, parallel: 3, strict: false, timeoutSec: 120, gapSec: 0 },
     targets: [
-      { provider: 'my', model: 'm-a' },
-      { provider: 'test', model: 'm-b' },
+      { provider: 'provider_a', model: 'm-a' },
+      { provider: 'provider_b', model: 'm-b' },
     ],
     results: [],
     error: null,
@@ -456,8 +456,8 @@ function fakeCapture() {
 test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3（17 键，camelCase 直映）', () => {
   const run = fakeRun({
     results: [
-      { provider: 'my', model: 'm-a', aggregate: fakeAggregate() },
-      { provider: 'test', model: 'm-b', aggregate: fakeAggregate({ prediction: 'p-2', predictionName: 'P Two' }) },
+      { provider: 'provider_a', model: 'm-a', aggregate: fakeAggregate() },
+      { provider: 'provider_b', model: 'm-b', aggregate: fakeAggregate({ prediction: 'p-2', predictionName: 'P Two' }) },
     ],
   });
   const records = buildHistoryRecords(run);
@@ -467,7 +467,7 @@ test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3�
   assert.equal(records[0].v, 1);
   assert.equal(records[0].ts, '2026-11-02T06:30:00.000Z', 'ts 用 finishedAt 的 ISO');
   assert.equal(records[0].runId, 'r-9');
-  assert.equal(records[0].provider, 'my');
+  assert.equal(records[0].provider, 'provider_a');
   assert.equal(records[0].model, 'm-a');
   assert.equal(records[0].predictionName, 'P One', 'camelCase 直映，不读 snake_case');
   assert.equal(records[0].familyName, 'Fam Name');
@@ -483,7 +483,7 @@ test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3�
 test('H2：aggregate 为 null（取消/失败）→ 仍每个目标一条记录，取安全默认且不抛', () => {
   let records = null;
   assert.doesNotThrow(() => {
-    records = buildHistoryRecords(fakeRun({ results: [{ provider: 'my', model: 'm-a', aggregate: null }], error: '取样异常：x', phase: 'failed' }));
+    records = buildHistoryRecords(fakeRun({ results: [{ provider: 'provider_a', model: 'm-a', aggregate: null }], error: '取样异常：x', phase: 'failed' }));
   });
   assert.equal(records.length, 2, '按 targets 产出 —— results 缺失时也要每个目标一条');
   for (const record of records) {
@@ -566,18 +566,18 @@ test('H2：/history 与 /history/models 必须带 stats.error（读失败的唯�
   process.env.DSH_FINGERPRINT_HISTORY = HISTORY_GOOD;
   const written = await appendRecords(
     buildHistoryRecords(
-      fakeRun({ results: [{ provider: 'my', model: 'm-a', aggregate: fakeAggregate({ validRounds: 1, totalRounds: 1 }) }] }),
+      fakeRun({ results: [{ provider: 'provider_a', model: 'm-a', aggregate: fakeAggregate({ validRounds: 1, totalRounds: 1 }) }] }),
     ),
   );
   assert.equal(written.ok, true, `写入应成功：${JSON.stringify(written)}`);
 
   const goodHistory = fakeCapture();
-  await routeHistory(new URLSearchParams('limit=1&provider=my'), goodHistory.response);
+  await routeHistory(new URLSearchParams('limit=1&provider=provider_a'), goodHistory.response);
   const goodHistoryBody = JSON.parse(goodHistory.body());
-  assert.equal(goodHistoryBody.records.length, 1, 'provider=my 过滤 + limit=1 生效');
-  assert.equal(goodHistoryBody.records[0].provider, 'my');
+  assert.equal(goodHistoryBody.records.length, 1, 'provider=provider_a 过滤 + limit=1 生效');
+  assert.equal(goodHistoryBody.records[0].provider, 'provider_a');
   assert.equal(goodHistoryBody.stats.error, null, '正常读：error 为 null（与"空历史"区分得开）');
-  // ⚠️ stats.count 是**文件总量**，与 provider/limit 过滤无关（本次写了 2 条：my/m-a + test/m-b）
+  // ⚠️ stats.count 是**文件总量**，与 provider/limit 过滤无关（本次写了 2 条：provider_a/m-a + provider_b/m-b）
   assert.equal(goodHistoryBody.stats.count, 2);
   assert.equal(goodHistoryBody.records.length < goodHistoryBody.stats.count, true, '过滤后的视图小于文件总量');
 
@@ -585,8 +585,8 @@ test('H2：/history 与 /history/models 必须带 stats.error（读失败的唯�
   await routeHistoryModels(goodModels.response);
   const goodModelsBody = JSON.parse(goodModels.body());
   assert.equal(goodModelsBody.models.length, 2, '两个目标 → 两个模型行');
-  // 两条记录 ts 相同 ⇒ 按 provider 字典序做确定性兜底：my 在前
-  assert.equal(goodModelsBody.models[0].provider, 'my');
+  // 两条记录 ts 相同 ⇒ 按 provider 字典序做确定性兜底：provider_a 在前
+  assert.equal(goodModelsBody.models[0].provider, 'provider_a');
   assert.equal(goodModelsBody.models[0].model, 'm-a');
   assert.equal(goodModelsBody.models[0].runs, 1);
   assert.equal(goodModelsBody.models[0].lastPrediction, 'p-1');
@@ -624,7 +624,7 @@ test('H2：parseHistoryQuery —— limit 钳到 1–200（非法走默认），
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('limit=-5')), { limit: 50 });
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('limit=abc')), { limit: 50 });
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('limit=12.7')), { limit: 12 });
-  assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=my&model=m-a')), { limit: 50, provider: 'my', model: 'm-a' });
+  assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=provider_a&model=m-a')), { limit: 50, provider: 'provider_a', model: 'm-a' });
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=&model=')), { limit: 50 }, '空串视为不过滤');
-  assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=my')), { limit: 50, provider: 'my' });
+  assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=provider_a')), { limit: 50, provider: 'provider_a' });
 });

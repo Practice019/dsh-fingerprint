@@ -49,11 +49,11 @@ function record(overrides = {}) {
     v: 1,
     ts: '2026-11-02T06:00:00.000Z',
     runId: 'r-1',
-    provider: 'my',
-    model: 'loomy/DeepSeek-V4.1-Flash',
+    provider: 'provider_a',
+    model: 'example/text-image',
     decision: 'scored',
-    prediction: 'deepseek-v4.1-flash-1017',
-    predictionName: 'DeepSeek V4.1 Flash',
+    prediction: 'example-v1-flash-0101',
+    predictionName: 'Example V1 Flash',
     family: 'deepseek',
     familyName: 'DeepSeek',
     probability: 0.9,
@@ -144,10 +144,10 @@ test('2) 追加 3 条 → 读回 3 条且最新在前', async () => {
 test('3) limit / provider / model 过滤各自正确', async () => {
   await withTemp(async () => {
     await appendRecords([
-      record({ ts: '2026-11-02T06:00:00.000Z', runId: 'a1', provider: 'my', model: 'M-a' }),
-      record({ ts: '2026-11-02T06:01:00.000Z', runId: 'a2', provider: 'my', model: 'M-b' }),
-      record({ ts: '2026-11-02T06:02:00.000Z', runId: 'a3', provider: 'test', model: 'M-a' }),
-      record({ ts: '2026-11-02T06:03:00.000Z', runId: 'a4', provider: 'my', model: 'M-a' }),
+      record({ ts: '2026-11-02T06:00:00.000Z', runId: 'a1', provider: 'provider_a', model: 'M-a' }),
+      record({ ts: '2026-11-02T06:01:00.000Z', runId: 'a2', provider: 'provider_a', model: 'M-b' }),
+      record({ ts: '2026-11-02T06:02:00.000Z', runId: 'a3', provider: 'provider_b', model: 'M-a' }),
+      record({ ts: '2026-11-02T06:03:00.000Z', runId: 'a4', provider: 'provider_a', model: 'M-a' }),
     ])
 
     // limit：取最新的 N 条
@@ -155,7 +155,7 @@ test('3) limit / provider / model 过滤各自正确', async () => {
     assert.equal((await readHistory({ limit: 100 })).length, 4, 'limit 超过总数时返回全部')
 
     // provider
-    assert.deepEqual((await readHistory({ provider: 'my' })).map((r) => r.runId), ['a4', 'a2', 'a1'])
+    assert.deepEqual((await readHistory({ provider: 'provider_a' })).map((r) => r.runId), ['a4', 'a2', 'a1'])
     assert.deepEqual((await readHistory({ provider: 'nope' })), [])
 
     // model
@@ -163,7 +163,7 @@ test('3) limit / provider / model 过滤各自正确', async () => {
 
     // 组合
     assert.deepEqual(
-      (await readHistory({ provider: 'my', model: 'M-a', limit: 1 })).map((r) => r.runId),
+      (await readHistory({ provider: 'provider_a', model: 'M-a', limit: 1 })).map((r) => r.runId),
       ['a4'],
     )
   })
@@ -346,7 +346,7 @@ test('8) aggregateByModel：同模型 3 条 → runs=3，last* 取最新那条�
     await appendRecords([
       record({
         ts: '2026-11-02T06:00:00.000Z',
-        provider: 'my',
+        provider: 'provider_a',
         model: 'M1',
         decision: 'unscorable',
         prediction: null,
@@ -355,7 +355,7 @@ test('8) aggregateByModel：同模型 3 条 → runs=3，last* 取最新那条�
       }),
       record({
         ts: '2026-11-02T06:01:00.000Z',
-        provider: 'my',
+        provider: 'provider_a',
         model: 'M1',
         decision: 'partial',
         prediction: 'P-mid',
@@ -364,7 +364,7 @@ test('8) aggregateByModel：同模型 3 条 → runs=3，last* 取最新那条�
       }),
       record({
         ts: '2026-11-02T06:02:00.000Z',
-        provider: 'my',
+        provider: 'provider_a',
         model: 'M1',
         decision: 'scored',
         prediction: 'P-last',
@@ -373,7 +373,7 @@ test('8) aggregateByModel：同模型 3 条 → runs=3，last* 取最新那条�
       }),
       record({
         ts: '2026-11-02T06:03:00.000Z',
-        provider: 'test',
+        provider: 'provider_b',
         model: 'M2',
         decision: 'scored',
         prediction: 'P2',
@@ -387,7 +387,7 @@ test('8) aggregateByModel：同模型 3 条 → runs=3，last* 取最新那条�
     assert.deepEqual(rows.map((r) => r.model), ['M2', 'M1'], '按 lastTs 降序')
 
     const m1 = rows.find((r) => r.model === 'M1')
-    assert.equal(m1.provider, 'my')
+    assert.equal(m1.provider, 'provider_a')
     assert.equal(m1.runs, 3)
     assert.equal(m1.lastTs, '2026-11-02T06:02:00.000Z')
     assert.equal(m1.lastDecision, 'scored')
