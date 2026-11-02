@@ -22,7 +22,7 @@ DSH Web UI 左侧栏的「**指纹检测**」面板：勾选你已配置的模�
 
 | 项 | 要求 |
 |---|---|
-| DSH 版本 | 见 `package.json` 的 `engines.dsh`：`>=0.2.1-rc.2 <0.3.0` |
+| DSH 版本 | 见 `package.json` 的 `engines.dsh`：`>=0.2.1-rc.2 <0.3.0-0` |
 | Node.js | `>= 22`（见 `engines.node`） |
 | 依赖 | **克隆后必须先 `npm install`** —— 仓库**不含** `node_modules/`（见「安装」） |
 | 网络 | **首次运行**需下载约 **3.6 MB** 参考数据（缓存到 `%LOCALAPPDATA%\lmfpd\data.bin`） |
@@ -120,7 +120,7 @@ dsh plugin --profile <profile> revoke-version dsh-fingerprint@0.1.0 --dsh-versio
 > *"Running it may cause crashes or data loss."*
 >
 > ⇒ **不要把豁免当成常规安装步骤**。它只应在你**确实被 skip、并且明确接受这个风险**时使用。
-> 更稳妥的做法是等本插件更新 `engines.dsh`，或者到仓库里开个 issue。
+> 更稳妥的做法是到仓库里开个 issue 说明你用的 DSH 版本 —— 只有 DSH 跨到 `0.3.x`（或更高）时才真的需要本插件更新 `engines.dsh`；`0.2.x` 的**任意** RC 本来就都被放行。
 > ⚠️ **我们不应该为了绕过一个并不存在的问题，而让任何人去执行一个真有风险的动作。**
 
 ⚠️ 两点实测更正/提醒：
@@ -322,7 +322,7 @@ HMR 在 profile-backed 启动下**默认开启**（`dsh-base` 组合包以 `root
 
 - **首次运行要下载参考数据**：`lmfpd-sdk` 的 `loadDetector()` 首次会下载约 **3.6 MB** 参考数据，缓存到 `%LOCALAPPDATA%\lmfpd\data.bin`。首次调用会慢、且**需要网络**；离线环境会失败（探测器保持 `ready: false`，`/fingerprint/status` 里能看到 `error`）。之后走缓存。
 - **Node 走代理需要显式开关**：Node 24 默认**不读** `HTTP_PROXY` / `HTTPS_PROXY` 等环境变量。若下载或模型调用要过代理，必须设 `NODE_USE_ENV_PROXY=1`（否则表现为连接超时）。
-- **`engines.dsh` 必须随 DSH 的新 RC 更新**：发布包**必须**声明 `engines.dsh`（自检 **C7** 强制），且它的范围**必须**覆盖你的运行时。详见上文「预发布陷阱」。
+- **`engines.dsh` 只在 DSH 跨到 `0.3.x`（或更高）时才需要动**：发布包**必须**声明 `engines.dsh`（自检 **C7** 强制），且它的范围**必须**覆盖你的运行时；但 **`0.2.x` 的任意 RC（`0.2.1-rc.4`、`0.2.5-rc.1`…）都不需要更新它** —— DSH 判兼容时带 `includePrerelease`，全部 `0.2.x` 预发布本就放行。详见上文「`engines.dsh` 的放行范围」。
   （本地开发期的取舍正好相反：那时我们刻意**不声明**它，以避免不兼容时被宿主 skip —— 发布语义是本条。）
 - **同时声明 `@deepseek-ai/dsh*` peerDependencies 是无效的**：只要 `engines.dsh` 存在，宿主就**只看它、忽略全部 dsh peer**（`dsh-app-boot/lib/index.js:301-304`）。自检把这种写法记 **INFO**，不判 FAIL，但建议删掉以免误导。
 - **密钥只在宿主侧**：明文 key 前端取不到（`credentials.describe()` 只回 `{configured,source?,writable}`），所以模型调用与指纹逻辑全在宿主侧，前端只做 UI + `fetch`。
@@ -387,6 +387,10 @@ node tools/selfcheck.mjs --judge-matrix                                 # 打印
 2. **公开名** —— `deepseek-official` / `deepseek-account` / `deepseek-chat` / `openai` / `anthropic` / `DEEPSEEK_API_KEY` / `DEEPSEEK_ACCOUNT_API_KEY` / `DEEPSEEK_OFFICIAL_API_KEY` / `DSH_FINGERPRINT_*` / `@deepseek-ai/*` / `api.deepseek.com` / `127.0.0.1` / RFC1918·RFC5737 / `family:"deepseek"` / `familyName:"DeepSeek"`；
 3. **数字型证据** —— 端口 `2418`、order `40`、各类计数。
 
+> ⚠️ **作用域说明（别把 X7 当通用脱敏审查）**：X7 查的是**一份冻结词表** —— 它只保证「**已登记的标识不复发**」，**不替代通用脱敏审查**：**不在词表里的新私有标识，它抓不到**。
+> 实测过：随手造一个词表外的 `sk-…` 形式串放进文件，X7 不会报 —— 这是**设计如此**（通用 `sk-` 前缀规则会误伤测试里的合成哨兵）。
+> ⇒ **新增 provider / 换机器 / 接入新服务之后**，仍然需要人对照契约 §49.1 把新标识**登记进词表**，X7 才会开始守它。
+
 ### ⚠️ 给后人的两条说明（都是防误判的，别"修正"）
 
 **① 词表是"碎片拼接"存放的 —— `grep` 不到明文词条是故意的，不是词表丢了。**
@@ -394,13 +398,14 @@ node tools/selfcheck.mjs --judge-matrix                                 # 打印
 原因：**X7 会扫描包括它自己在内的所有文件**。如果词表是明文，每次运行都会命中它自己，于是只剩两条坏路 —— 把该文件加进排除集（**等于给自己开后门**，正是"范围不足"的温床），或让检查永远红（**等于没有这项检查**）。碎片拼接让检查可以**在不给自己开豁免的前提下扫自己**。
 ⇒ 代价：人肉 `grep` 找不到明文词条。**要确认词表内容请看契约 §49.1，不要以为它丢了。**
 
-**② 私有 provider 名的处理是"刻意的非对称"—— 不要"修正"成对称。**
-- **my**：**认**"引号里只有它自己"这种形态。
-- **test**：**只认**键名上下文与 URL 查询这两类。
-原因：**test** 单独出现在引号里、在测试代码中太常见（测试框架名、用例名），**认它会立刻误报并杀死这项检查** —— **误报比漏报更早杀死一项检查**。
+**② 两个私有 provider 名的处理是"刻意的非对称"—— 不要"修正"成对称。**
+下面用 `provider-a` / `provider-b` 作**代称**（**代称不是真实名字**；真实词表见 `tools/selfcheck.mjs` 的词表定义，它以碎片形式存放）：
+- `provider-a`：**认**"引号里只有它自己"这种形态。
+- `provider-b`：**只认**键名上下文与 URL 查询这两类。
+原因：`provider-b` 单独出现在引号里、在测试代码中太常见（测试框架名、用例名），**认它会立刻误报并杀死这项检查** —— **误报比漏报更早杀死一项检查**。
 
-> 📌 上面这两个名字**故意不用反引号包起来**：**反引号包裹本身就是 X7 判定命中的形态之一**，包起来会让这份 README **自己**触发 X7。
-> 这不是排版疏忽 —— 实测过：写上去之后 `node tools/selfcheck.mjs` 立刻从 `PASS 29 / FAIL 0` 变成 `PASS 28 / FAIL 1`，报"私有名（引号/反引号包裹）2 处"。**文档自己也得是干净的。**
+> 📌 这段文字最初刻意用**粗体**而不是反引号，就是为了避开 X7 —— **反引号包裹本身就是 X7 判定命中的形态之一**。换成 `provider-a` / `provider-b` 这类**代称**之后它们不在词表里，用反引号就没问题了。
+> 实测过：直接用真名 + 反引号会让这份 README **自己**触发 X7 —— `node tools/selfcheck.mjs` 从 `PASS 29 / FAIL 0` 变成 `PASS 28 / FAIL 1`，报"私有名（引号/反引号包裹）2 处"。**文档自己也得是干净的。**
 
 **C7 是发布语义**：本地开发时我们**刻意不声明** `engines.dsh`；发布则**必须声明**且覆盖运行时。判定过程会完整打印（判定对象、判定引擎、每个比较子是否通过）。
 
@@ -658,7 +663,7 @@ if ($abs.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -an
 | 设计文档 | `docs/DESIGN.md` |
 | 文档 | `README.md` |
 
-**计数**：2 + 3 + 1×9（`lib/` 8 份 + `client.js`）+ 3（`tools/`）+ 7（`test/`）+ 1（`docs/`）+ 1（`README.md`）= **25** ✔
+**计数**（逐项对齐 `git ls-files`）：`lib/` **7** + `test/` **7** + `tools/` **3** + `docs/` **1** + 根目录 **7**（`README.md` · `client.js` · `package.json` · `cordis.patch.yml` · `LICENSE` · `.gitignore` · `.gitattributes`）= **25** ✔
 
 > 与 `git ls-files` 对齐（取权威清单的方式：`git -C <plugin-dir> ls-files`，等价于
 > `gh api repos/Practice019/dsh-fingerprint/git/trees/main?recursive=1`）。
@@ -667,8 +672,6 @@ if ($abs.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -an
 > - `node_modules/` —— `.gitignore` 忽略，需要 `npm install` 自己装；
 > - `.smoke.json` —— 开发期诊断产物，每次运行覆盖写，同样被忽略。**看到它存在于你的本地目录是正常的，但它不会被提交。**
 
-> 计数：2 + 2 + 1×8 + 4（tools）+ 7（test）+ 1（docs）+ 1（README）+ 1（`.smoke.json`）= **25** ✔
->
 > 若你 fork 后想动 `tools/` 下的东西：那三份文件职责完全不同（静态自检 / 运行时冒烟 / 一次性驱动），改之前先看清自己改的是哪一份。
 
 发现别人文件里的缺陷 → **只回报，不代改**。（本仓库开发期就是这么协作的。）
