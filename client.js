@@ -349,12 +349,8 @@ window.__ModuleLoader__.load({
       colFamily: "家族",
       colConfidence: "置信度",
       colAgreement: "一致率",
-      colStability: "稳定标记",
       colDecision: "decision",
       colError: "失败原因",
-      stabilityStable: "稳定",
-      stabilityUnstable: "结果不稳定，建议增加轮次",
-      stabilityInconclusive: "样本不足，建议增加轮次",
       decisionScored: "已评分",
       decisionPartial: "部分回合有效",
       decisionUnscorable: "无可评分回合",
@@ -369,6 +365,16 @@ window.__ModuleLoader__.load({
       historyWriteFailedHint:
         "这次检测的结果可能没有存下来 —— 记录是在 run 结束时写入的，写入失败的那一次不会出现在下面的列表里。（失败时刻 {at}）",
       noRank: "无排名",
+      // ── §61.4 C/D：置信度原因 + 历史页列语义拆分 ────────────────────────
+      probabilityUncalibrated: "—（未校准）",
+      calibrationNote: "校准参数与当前检测器不匹配，置信度不可用；候选顺序由排名分数决定。",
+      colVerdict: "结论",
+      colReason: "原因",
+      verdictStable: "稳定",
+      verdictUnstable: "不稳定",
+      verdictInsufficient: "样本不足",
+      reasonAddRounds: "建议增加轮次",
+      interruptedShort: "被打断（无结果）",
       colValidRounds: "有效回合",
       metricNote:
         "口径：一致率 = 胜者得票 / 有效回合（不是总轮次）；置信度 = 有效回合 probability 的中位数；有效回合 = decision 为 scored 且给出 top1 的回合。",
@@ -508,12 +514,8 @@ window.__ModuleLoader__.load({
       colFamily: "Family",
       colConfidence: "Confidence",
       colAgreement: "Agreement",
-      colStability: "Stability",
       colDecision: "decision",
       colError: "Error",
-      stabilityStable: "stable",
-      stabilityUnstable: "unstable — add rounds",
-      stabilityInconclusive: "insufficient samples — add rounds",
       decisionScored: "scored",
       decisionPartial: "partial",
       decisionUnscorable: "unscorable",
@@ -527,6 +529,15 @@ window.__ModuleLoader__.load({
       historyWriteFailedHint:
         "This detection result may not have been saved — records are written when the run reaches a terminal state, so the failed write never shows up in the list below. (failed at {at})",
       noRank: "no ranking",
+      probabilityUncalibrated: "— (uncalibrated)",
+      calibrationNote: "Calibration parameters do not match the current detector, so confidence is unavailable; candidate order comes from ranking scores.",
+      colVerdict: "Verdict",
+      colReason: "Reason",
+      verdictStable: "stable",
+      verdictUnstable: "unstable",
+      verdictInsufficient: "insufficient samples",
+      reasonAddRounds: "add rounds",
+      interruptedShort: "interrupted (no result)",
       colValidRounds: "Valid rounds",
       metricNote:
         "Definitions: agreement = winner votes / valid rounds (not total rounds); confidence = median probability over valid rounds; a valid round is one with decision 'scored' and a top1.",
@@ -936,6 +947,52 @@ window.__ModuleLoader__.load({
       if (typeof value !== "number" || !Number.isFinite(value)) return "—";
       if (value <= 1) return (value * 100).toFixed(1) + "%";
       return value.toFixed(3);
+    }
+
+    /**
+     * 置信度状态（契约 §61.4 C）：`probabilityStatus` 由数据层给出
+     * （`'reference_calibrated' | 'unavailable' | null`）；**可能缺失**（旧记录）⇒ 返回 null（未知）。
+     * 历史聚合行兼容 `lastProbabilityStatus`（W7 若采用该命名则自动生效）。
+     */
+    function probabilityStatusOf(row, altKey) {
+      if (row === null || row === undefined) return null;
+      const direct = textOf(row.probabilityStatus);
+      if (direct.length > 0) return direct;
+      if (altKey !== undefined) {
+        const alt = textOf(row[altKey]);
+        if (alt.length > 0) return alt;
+      }
+      return null;
+    }
+
+    /**
+     * 置信度单元格（契约 §61.4 C）——核心原则：
+     * 「**算出 0**」「**未校准**」「**还没算**」「**数据损坏**」四种在界面上不能长得一样。
+     *   数字                        → 现有格式（**不变**）
+     *   null + `unavailable`        → `—（未校准）` + tooltip 全文（不是 bug，是校准参数不匹配）
+     *   null + `reference_calibrated` → `—`（声明已校准却无数值 ⇒ 按未知处理，**不**说未校准）
+     *   null + null / 字段缺失       → `—`（旧记录，未知）
+     */
+    function renderProbabilityCell(value, status) {
+      if (typeof value === "number" && Number.isFinite(value)) return jsx("span", { children: formatProbability(value) });
+      if (status === "unavailable") {
+        // 注意：模块作用域只有 t()（页面作用域才有 tt() 的注入翻译器）
+        return jsx("span", { title: t("calibrationNote"), style: { color: COLOR.warn }, children: t("probabilityUncalibrated") });
+      }
+      return jsx("span", { children: "—" });
+    }
+
+    /** 该行是否需要"未校准"脚注。 */
+    function needsCalibrationNote(value, status) {
+      return !(typeof value === "number" && Number.isFinite(value)) && status === "unavailable";
+    }
+
+    /** 摘要截断（列表用）：保留可读前缀，全文放 title（绝不吞掉——悬停可看全）。 */
+    function truncateText(value, max) {
+      const text = textOf(value);
+      const limit = Number.isFinite(max) ? max : 40;
+      if (text.length <= limit) return text;
+      return text.slice(0, limit) + "…";
     }
 
     /** 毫秒展示。 */
@@ -2263,10 +2320,11 @@ window.__ModuleLoader__.load({
         {
           key: "top1",
           title: tt("colTop1"),
+          // §61.4 D：无排名不是 top1 的取值（它是结论）⇒ 这里无值显示 —；结论列里按需带「无排名」
           render: (row) => {
             const aggregate = row.aggregate;
             const top1 = pickText(aggregate ? aggregate.predictionName : null, aggregate ? aggregate.prediction : null);
-            return jsx("span", { children: top1 === null ? tt("noRank") : top1 });
+            return jsx("span", { children: top1 === null ? "—" : top1 });
           },
         },
         {
@@ -2281,7 +2339,7 @@ window.__ModuleLoader__.load({
         {
           key: "confidence",
           title: tt("colConfidence"),
-          render: (row) => jsx("span", { children: formatProbability(row.aggregate ? row.aggregate.confidence : null) }),
+          render: (row) => renderProbabilityCell(row.aggregate ? row.aggregate.confidence : null, probabilityStatusOf(row.aggregate)),
         },
         {
           key: "agreement",
@@ -2305,13 +2363,29 @@ window.__ModuleLoader__.load({
         },
         {
           key: "stability",
-          title: tt("colStability"),
+          // §61.4 D：与历史页**同一份判定**（下面 verdictOf 与历史页共用，不写第二份）
+          title: tt("colVerdict"),
           render: (row) => {
-            const stability = textOf(row.aggregate && row.aggregate.stability);
-            if (stability === "stable") return jsx("span", { style: { color: COLOR.ok }, children: tt("stabilityStable") });
-            if (stability === "unstable") return jsx("span", { style: { color: COLOR.warn }, children: tt("stabilityUnstable") });
-            if (stability === "inconclusive") return jsx("span", { style: { color: COLOR.mute }, children: tt("stabilityInconclusive") });
-            return jsx("span", { children: "—" });
+            const verdict = verdictOf(row.aggregate ? row.aggregate.stability : null, row.error);
+            const top1 = pickText(row.aggregate ? row.aggregate.predictionName : null, row.aggregate ? row.aggregate.prediction : null);
+            return jsx("span", { style: { color: verdict.color }, children: verdictLabel(verdict, top1 === null) });
+          },
+        },
+        {
+          key: "reason",
+          title: tt("colReason"),
+          render: (row) => {
+            /**
+             * ⚠️ **两页的「原因」列规则故意不同，这是有意的**：
+             * · 检测页左邻已经有完整的「失败原因」列 ⇒ 同一段 `error` 在同一页出现两遍是噪音，
+             *   所以这里**被打断时留空**，只放「建议增加轮次」。
+             * · 历史页没有「失败原因」列，`原因` 是 `error` 的唯一落点 ⇒ 那里照旧给截断摘要 + title 全文。
+             * 判定仍然共用 verdictOf（不写第二份），只是"渲染哪些内容"按页面语境取舍。
+             * `row.error` 来自运行结果本身（tasks[].error → errorByTarget），不是臆造字段。
+             */
+            const verdict = verdictOf(row.aggregate ? row.aggregate.stability : null, textOf(row.error));
+            if (verdict.kind === "insufficient") return jsx("span", { style: { color: COLOR.mute }, children: tt("reasonAddRounds") });
+            return jsx("span", { children: "" });
           },
         },
         {
@@ -2362,7 +2436,7 @@ window.__ModuleLoader__.load({
                       { key: "votes", title: tt("colVotes"), render: (item) => formatNumber(item.votes) },
                       { key: "meanRank", title: tt("colMeanRank"), render: (item) => (Number.isFinite(item.meanRank) ? item.meanRank.toFixed(2) : "—") },
                       { key: "score", title: tt("colScore"), render: (item) => (Number.isFinite(item.score) ? item.score.toFixed(4) : "—") },
-                      { key: "probability", title: tt("colProb"), render: (item) => formatProbability(item.probability) },
+                      { key: "probability", title: tt("colProb"), render: (item) => renderProbabilityCell(item.probability, probabilityStatusOf(item)) },
                     ],
                     rows: ranking.map((item, index) => ({ __key: textOf(item.model) + String(index), __rank: index + 1, ...item })),
                   }),
@@ -2392,10 +2466,11 @@ window.__ModuleLoader__.load({
                         // 契约 §9.2：perRound 的 prediction 是 SDK 原样透传，无排名时可能是空串。
                         render: (item) => {
                           const top1 = pickText(item.predictionName, item.prediction);
-                          return jsx("span", { children: top1 === null ? tt("noRank") : top1 });
+                          // §61.4 D 全站口径：「无排名」不是取值 ⇒ 取值列一律 —
+                          return jsx("span", { children: top1 === null ? "—" : top1 });
                         },
                       },
-                      { key: "probability", title: tt("colRoundProb"), render: (item) => formatProbability(item.probability) },
+                      { key: "probability", title: tt("colRoundProb"), render: (item) => renderProbabilityCell(item.probability, probabilityStatusOf(item)) },
                       { key: "error", title: tt("colError"), render: (item) => (textOf(item.error).length > 0 ? jsx("span", { style: { color: COLOR.bad }, children: textOf(item.error) }) : "—") },
                     ],
                     rows: perRound.map((item, index) => ({ __key: String(index), __position: index + 1, ...item })),
@@ -2440,6 +2515,31 @@ window.__ModuleLoader__.load({
       }
 
       // ── 历史页（契约 §29.6）─────────────────────────────────────────────
+      /**
+       * ⚠️ **全页唯一一份**结论判定（契约 §61.4 D）——**检测页结果表与历史页共用这一份**，
+       * 不允许在别处再写第二份判定逻辑（两份必然漂移）。
+       * 返回 `{ kind, label, color }`，kind ∈ interrupted | stable | unstable | insufficient | unknown。
+       * 规则沿用 FIX-A3（§55）：**error 非空 ⇒ 被打断**（warn 色），且不再显示「样本不足」。
+       */
+      function verdictOf(stabilityText, errorText) {
+        if (textOf(errorText).length > 0) return { kind: "interrupted", label: tt("interrupted"), color: COLOR.warn };
+        const stability = textOf(stabilityText);
+        if (stability === "stable") return { kind: "stable", label: tt("verdictStable"), color: COLOR.ok };
+        if (stability === "unstable") return { kind: "unstable", label: tt("verdictUnstable"), color: COLOR.warn };
+        if (stability === "inconclusive") return { kind: "insufficient", label: tt("verdictInsufficient"), color: COLOR.mute };
+        return { kind: "unknown", label: "—", color: COLOR.mute };
+      }
+
+      /**
+       * 结论列的最终文案（§61.4 D + OPT-3 件 B）：
+       * 「无排名」**只在结论是"样本不足"时**才跟在后面 ——
+       * 被打断本来就没结果，再写一遍是冗余；稳定/不稳定也不带。
+       */
+      function verdictLabel(verdict, top1Missing) {
+        if (verdict.kind === "insufficient" && top1Missing) return verdict.label + " · " + tt("noRank");
+        return verdict.label;
+      }
+
       /** 聚合表里某个模型的明细行（最近 N 条）。 */
       function renderHistoryDetail(provider, model, key) {
         const entry = historyDetail[key];
@@ -2450,6 +2550,8 @@ window.__ModuleLoader__.load({
         }
         const records = safeList(entry.records);
         const detailStatsError = textOf(entry.statsError);
+        // §61.4 C：只要有任一行是"未校准"，就在表下给一条可见说明（不只靠悬停 tooltip）
+        const detailHasUncalibrated = records.some((row) => needsCalibrationNote(row.probability, probabilityStatusOf(row)));
         return jsxs("div", {
           children: [
             // 父任务更正 3：/history 的 stats.error 非空 ⇒ 必须显式提示，不得显示成「暂无明细记录」
@@ -2457,6 +2559,7 @@ window.__ModuleLoader__.load({
               ? jsx("div", { key: "stats-error", style: S.noticeBad, children: tt("historyLoadFailed", { reason: detailStatsError }) })
               : null,
             jsx("p", { key: "t", style: S.hint, children: tt("historyDetailTitle", { n: records.length }) }),
+            detailHasUncalibrated ? jsx("p", { key: "calib", style: { ...S.hint, color: COLOR.warn }, children: tt("calibrationNote") }) : null,
             jsx(DataTable, {
               key: "table",
               // records.length === 0 且 stats.error 非空时不要谎报「暂无记录」
@@ -2465,10 +2568,14 @@ window.__ModuleLoader__.load({
                 { key: "ts", title: tt("colWhen"), render: (row) => formatWhen(row.ts) },
                 {
                   key: "decision",
-                  title: tt("colDecision"),
+                  // §61.4 D：其余表头都是中文，只有它是英文 ⇒ 统一为「结论」
+                  title: tt("colVerdict"),
                   render: (row) => {
                     const decision = textOf(row.decision);
                     const error = recordError(row);
+                    const top1 = pickText(row.predictionName, row.prediction);
+                    // 与聚合表/检测页**同一份判定**（不写第二份）
+                    const verdict = verdictOf(row.stability, error);
                     /**
                      * §55：`error` 非空 ⇒ 这次 run 根本没走完，**不能**渲染成「样本不足 / 无可评分回合」——
                      * 那会把"被打断"误报成"样本不够，再加几轮"，正是操作者报的那个误导。
@@ -2484,18 +2591,22 @@ window.__ModuleLoader__.load({
                     const label =
                       decision === "scored" ? tt("decisionScored") : decision === "partial" ? tt("decisionPartial") : decision === "unscorable" ? tt("decisionUnscorable") : decision;
                     const color = decision === "scored" ? COLOR.ok : decision === "partial" ? COLOR.warn : COLOR.mute;
-                    return jsx("span", { style: { color: color }, children: label.length > 0 ? label : "—" });
+                    // §61.4 D 统一规则：「无排名」只在结论是"样本不足"时并入结论列（被打断/稳定/不稳定都不拼）
+                    const text = label.length > 0 ? label : "—";
+                    const shown = verdict.kind === "insufficient" && top1 === null ? text + " · " + tt("noRank") : text;
+                    return jsx("span", { style: { color: color }, children: shown });
                   },
                 },
                 {
                   key: "top1",
                   title: tt("colTop1"),
+                  // §61.4 D：无排名不是 top1 的取值（它已并入结论列）⇒ 这里无值显示 —
                   render: (row) => {
                     const top1 = pickText(row.predictionName, row.prediction);
-                    return jsx("span", { children: top1 === null ? tt("noRank") : top1 });
+                    return jsx("span", { children: top1 === null ? "—" : top1 });
                   },
                 },
-                { key: "probability", title: tt("colConfidence"), render: (row) => formatProbability(row.probability) },
+                { key: "probability", title: tt("colConfidence"), render: (row) => renderProbabilityCell(row.probability, probabilityStatusOf(row)) },
                 { key: "agreement", title: tt("colAgreement"), render: (row) => formatProbability(row.agreement) },
                 {
                   key: "validRounds",
@@ -2621,29 +2732,37 @@ window.__ModuleLoader__.load({
                 {
                   key: "lastTop1",
                   title: tt("colLastTop1"),
+                  // §61.4 D：「无排名」不是 top1 的取值，它是**结论**（已移到结论列）⇒ 这里无值就 —
                   render: (row) => {
                     const top1 = pickText(row.lastPredictionName, row.lastPrediction);
-                    return jsx("span", { children: top1 === null ? tt("noRank") : top1 });
+                    return jsx("span", { children: top1 === null ? "—" : top1 });
                   },
                 },
-                { key: "lastProbability", title: tt("colConfidence"), render: (row) => formatProbability(row.lastProbability) },
+                { key: "lastProbability", title: tt("colConfidence"), render: (row) => renderProbabilityCell(row.lastProbability, probabilityStatusOf(row, "lastProbabilityStatus")) },
                 {
                   key: "lastStability",
-                  title: tt("colStability"),
+                  // §61.4 D：这一列以前同时装了「结论」和「结论的原因」两件事 ⇒ 拆成 结论 / 原因 两列
+                  title: tt("colVerdict"),
                   render: (row) => {
-                    /**
-                     * §55：聚合行带 `lastError`（W7 新增）⇒ 最近那次 run 没走完，
-                     * 不能再显示「样本不足」——那是"再跑几轮就好"的错误暗示。
-                     * 字段缺失（旧宿主）⇒ 走下面的原有分支，行为不变。
-                     */
-                    if (recordError(row).length > 0) {
-                      return jsx("span", { style: { color: COLOR.warn }, children: tt("interrupted") });
+                    // 共用判定（与检测页同一份 verdictOf / verdictLabel）
+                    const verdict = verdictOf(row.lastStability, recordError(row));
+                    const top1 = pickText(row.lastPredictionName, row.lastPrediction);
+                    return jsx("span", { style: { color: verdict.color }, children: verdictLabel(verdict, top1 === null) });
+                  },
+                },
+                {
+                  key: "reason",
+                  title: tt("colReason"),
+                  render: (row) => {
+                    const error = recordError(row);
+                    if (error.length > 0) {
+                      // 摘要可截断，但全文在 title 里（悬停可看全，绝不吞掉）
+                      return jsx("span", { title: error, style: { color: COLOR.warn }, children: truncateText(error, 40) });
                     }
-                    const stability = textOf(row.lastStability);
-                    if (stability === "stable") return jsx("span", { style: { color: COLOR.ok }, children: tt("stabilityStable") });
-                    if (stability === "unstable") return jsx("span", { style: { color: COLOR.warn }, children: tt("stabilityUnstable") });
-                    if (stability === "inconclusive") return jsx("span", { style: { color: COLOR.mute }, children: tt("stabilityInconclusive") });
-                    return jsx("span", { children: "—" });
+                    if (textOf(row.lastStability) === "inconclusive") {
+                      return jsx("span", { style: { color: COLOR.mute }, children: tt("reasonAddRounds") });
+                    }
+                    return jsx("span", { children: "" });
                   },
                 },
                 {
@@ -2662,6 +2781,10 @@ window.__ModuleLoader__.load({
               rows: filtered.map((row, index) => ({ __key: String(index) + targetKey(textOf(row.provider), textOf(row.model)), ...row })),
             }),
           );
+          // §61.4 C：聚合表里只要有一行"未校准"，同样给一条可见说明
+          if (filtered.some((row) => needsCalibrationNote(row.lastProbability, probabilityStatusOf(row, "lastProbabilityStatus")))) {
+            body.push(jsx("p", { key: "calib", style: { ...S.hint, color: COLOR.warn }, children: tt("calibrationNote") }));
+          }
           // 展开中的模型：明细跟在表下面
           for (const row of filtered) {
             const key = targetKey(textOf(row.provider), textOf(row.model));

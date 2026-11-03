@@ -47,6 +47,9 @@ const SCENARIOS = [
   'historyCountScope',
   'historyInterrupted',
   'historyWriteFail',
+  'probabilityStates',
+  'historyColumns',
+  'detectVerdictColumns',
   'hostActiveRunDead',
   'hostActiveRunAlive',
   'regress',
@@ -85,10 +88,13 @@ const ASSERTION_FLOOR = {
   historyStatsError: 16,
   historyEmpty: 15,
   historyUnready: 15,
-  historyRealFixture: 22,
+  historyRealFixture: 24,
   historyCountScope: 16,
-  historyInterrupted: 21,
+  historyInterrupted: 23,
   historyWriteFail: 18,
+  probabilityStates: 24,
+  historyColumns: 24,
+  detectVerdictColumns: 26,
   hostActiveRunDead: 19,
   hostActiveRunAlive: 19,
   regress: 16,
@@ -526,7 +532,7 @@ async function runScenario(scenario, mode, src) {
   const providerD = { provider: 'provider_b', displayName: 'provider_b', active: true, dormant: false, api: 'openai-completions', baseURL: 'http://d/v1', credentialRef: 'PROVIDER_B_API_KEY', credentialRefSource: 'profile', credentialAvailable: false, error: null, models: [{ id: 'local/foo', name: 'local/foo', source: 'catalog', input: ['text'], contextWindow: null, maxTokens: null }] };
   const DORMANT = [];
   for (let i = 0; i < 41; i += 1) {
-    const name = 'catalog-provider-' + String(i);
+    const name = 'catalog_provider_' + String(i);
     DORMANT.push({ provider: name, displayName: name, active: false, dormant: true, declared: true, api: 'openai-completions', baseURL: 'https://api.' + String(i) + '.example/v1', credentialRef: name.toUpperCase().replace(/-/g, '_') + '_API_KEY', credentialAvailable: false, error: null, models: [{ id: name + '/model-x', name: name + '/model-x', source: 'config', input: ['text'] }] });
   }
   const dormantKeys = DORMANT.map((p) => p.provider + '\u0000' + p.models[0].id);
@@ -605,6 +611,46 @@ async function runScenario(scenario, mode, src) {
   const deadRun = { runId: 'r-dead', startedAt: '2026-11-03T00:10:02.315Z', sameProcess: false, options: { rounds: 3, count: 3, parallel: 3, strict: true }, targets: [{ provider: 'provider_a', model: 'acme/text-large' }] };
   const liveRun = { runId: 'r-live', startedAt: '2026-11-03T00:20:00.000Z', sameProcess: true, options: { rounds: 3, count: 3, parallel: 3, strict: false }, targets: [{ provider: 'provider_a', model: MODEL }] };
   const writeError = { at: '2026-11-03T00:12:44.001Z', message: 'EACCES: permission denied, open ...\\history.jsonl' };
+
+  // ── §61.4 C/D 夹具：置信度三态 + 列语义拆分 ─────────────────────────────
+  const CALIB_NOTE = '校准参数与当前检测器不匹配，置信度不可用；候选顺序由排名分数决定。';
+  /** 原因列的**截断**要用一条真的超长 error 才验得出来（短 error 本来就不该截断）。 */
+  const INTERRUPTED_LONG_ERROR = INTERRUPTED_ERROR + '；宿主进程在写入结果前退出，本轮所有目标均未落盘，请重新发起检测或扩大超时后重试。';
+  const probModelRow = { provider: 'provider_a', model: MODEL, lastTs: '2026-11-03T01:00:00.000Z', runs: 4, lastDecision: 'scored', lastPrediction: MODEL, lastPredictionName: 'Example V1 Flash', lastProbability: null, lastProbabilityStatus: 'unavailable', lastStability: 'stable' };
+  const probRecords = [
+    { v: 1, ts: '2026-11-03T01:00:00.000Z', runId: 'r-1', provider: 'provider_a', model: MODEL, decision: 'scored', prediction: MODEL, predictionName: 'Example V1 Flash', probability: 0.9096, probabilityStatus: 'reference_calibrated', agreement: 1, stability: 'stable', validRounds: 3, totalRounds: 3, error: null },
+    { v: 1, ts: '2026-11-03T00:50:00.000Z', runId: 'r-2', provider: 'provider_a', model: MODEL, decision: 'scored', prediction: MODEL, predictionName: 'Example V1 Flash', probability: null, probabilityStatus: 'unavailable', agreement: 1, stability: 'stable', validRounds: 3, totalRounds: 3, error: null },
+    // 声明已校准却无数值 ⇒ 按未知处理，**不得**说"未校准"
+    { v: 1, ts: '2026-11-03T00:40:00.000Z', runId: 'r-3', provider: 'provider_a', model: MODEL, decision: 'scored', prediction: MODEL, predictionName: 'Example V1 Flash', probability: null, probabilityStatus: 'reference_calibrated', agreement: 1, stability: 'stable', validRounds: 3, totalRounds: 3, error: null },
+    // 旧记录：字段缺失 ⇒ 未知
+    { v: 1, ts: '2026-11-03T00:30:00.000Z', runId: 'r-4', provider: 'provider_a', model: MODEL, decision: 'scored', prediction: MODEL, predictionName: 'Example V1 Flash', probability: null, agreement: 1, stability: 'stable', validRounds: 3, totalRounds: 3, error: null },
+  ];
+  const colStableRow = { provider: 'provider_a', model: MODEL, lastTs: '2026-11-03T01:00:00.000Z', runs: 2, lastDecision: 'scored', lastPrediction: MODEL, lastPredictionName: 'Example V1 Flash', lastProbability: 0.9096, lastStability: 'stable' };
+  const colInsufficientRow = { provider: 'provider_b', model: 'example/second', lastTs: '2026-11-03T00:58:00.000Z', runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive' };
+  const colInterruptedRow = { provider: 'provider_a', model: 'acme/text-large', lastTs: '2026-11-03T00:55:00.000Z', runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive', lastError: INTERRUPTED_LONG_ERROR };
+
+  // ── OPT-3 件 A 夹具：检测页结果表（结论/原因 与历史页同一判定）────────────────
+  // row.error 来自**运行结果本身**（tasks[].error → errorByTarget），不是臆造字段
+  const detectAgg = (over) => Object.assign({ decision: 'unscorable', prediction: null, predictionName: null, family: null, familyName: null, validRounds: 0, totalRounds: 3, agreement: null, confidence: null, stability: 'inconclusive', ranking: [], perRound: [] }, over);
+  const detectSnapshot = {
+    ok: true,
+    runId: 'r-1',
+    phase: 'done',
+    startedAt: 1762000000000,
+    finishedAt: 1762000300000,
+    options: { rounds: 3, count: 3, parallel: 3, strict: false, timeoutSec: 120, gapSec: 0 },
+    error: null,
+    tasks: [
+      { provider: 'provider_a', model: MODEL, round: 1, totalRounds: 3, state: 'complete', count: 300, expectedCount: 300, firstByteMs: 412, error: null },
+      // 这一条的 error 会经 errorByTarget 落到「acme/text-large」那一行的 row.error 上
+      { provider: 'provider_a', model: 'acme/text-large', round: 1, totalRounds: 3, state: 'failed', count: 0, expectedCount: 300, firstByteMs: null, error: INTERRUPTED_LONG_ERROR },
+    ],
+    results: [
+      { provider: 'provider_a', model: MODEL, aggregate: detectAgg({ decision: 'scored', prediction: MODEL, predictionName: 'Example V1 Flash', validRounds: 3, agreement: 1, confidence: 0.9096, probabilityStatus: 'reference_calibrated', stability: 'stable' }) },
+      { provider: 'provider_a', model: 'example/second', aggregate: detectAgg({ totalRounds: 3 }) },
+      { provider: 'provider_a', model: 'acme/text-large', aggregate: detectAgg({ totalRounds: 1 }) },
+    ],
+  };
   const hostStatusDead = { ok: true, detector, activeRunId: 'r-dead', activeRun: deadRun, lastHistoryError: null };
   const hostStatusAlive = { ok: true, detector, activeRunId: 'r-live', activeRun: liveRun, lastHistoryError: null };
   const hostStatusWriteFail = { ok: true, detector, activeRunId: null, activeRun: null, lastHistoryError: writeError };
@@ -710,6 +756,11 @@ async function runScenario(scenario, mode, src) {
     },
     historyWriteFail: { status: hostStatusWriteFail, runs: {}, history: { models: [realModelRow], stats: { count: 1, path: 'x', oldest: realRecord.ts, newest: realRecord.ts, skippedLines: 0, error: null }, records: [realRecord], removed: 0 } },
     hostActiveRunDead: { status: hostStatusDead, runs: {} },
+    // §61.4 C：置信度三态（数字 / unavailable / reference_calibrated+null / 缺失）
+    probabilityStates: { status: statusNull, runs: {}, history: { models: [probModelRow], stats: { count: 4, path: 'x', oldest: 'a', newest: 'b', skippedLines: 0, error: null }, records: probRecords, removed: 0 } },
+    // §61.4 D：结论 / 原因 两列各自装对东西
+    historyColumns: { status: statusNull, runs: {}, history: { models: [colStableRow, colInsufficientRow, colInterruptedRow], stats: { count: 3, path: 'x', oldest: 'a', newest: 'b', skippedLines: 0, error: null }, records: [], removed: 0 } },
+    detectVerdictColumns: { status: statusNull, runs: { 'r-1': detectSnapshot }, seedKeys: { runId: 'r-1' }, detectSnapshot: true },
     hostActiveRunAlive: { status: hostStatusAlive, runs: { 'r-live': Object.assign({}, runningSnapshot, { runId: 'r-live' }) } },
     regress: { status: statusNull, runs: {}, regression: true },
   };
@@ -736,6 +787,10 @@ async function runScenario(scenario, mode, src) {
   }
   if (spec.simpleSnapshot) {
     routes['/fingerprint/run/r-1'] = snapshotSimple;
+    routes['/fingerprint/run/r-1/export'] = { ok: true, runId: 'r-1', targets: [] };
+  }
+  if (spec.detectSnapshot) {
+    routes['/fingerprint/run/r-1'] = detectSnapshot;
     routes['/fingerprint/run/r-1/export'] = { ok: true, runId: 'r-1', targets: [] };
   }
   if (spec.holes) routes['/fingerprint/run/r-1'] = snapshotHoles;
@@ -976,7 +1031,9 @@ async function runScenario(scenario, mode, src) {
     const after = await flush(panelComp);
     const t2 = after.out.texts.join('\n');
     check('13) 真机夹具：模型行渲染', t2.includes('acme/text-large'));
-    check('13) stability=inconclusive → 「样本不足，建议增加轮次」', t2.includes('样本不足，建议增加轮次'));
+    // §61.4 D 列拆分后：结论列 = 「样本不足 · 无排名」，原因列 = 「建议增加轮次」。
+    // 判据未被削弱 —— 由"一句话同时命中"改成**分别命中两列**（更锐利）。
+    check('13) 结论列=「样本不足 · 无排名」且 原因列=「建议增加轮次」', t2.includes('样本不足 · 无排名') && t2.includes('建议增加轮次'));
     check('13) null 全渲染成 —（无字面量 undefined / 0）', t2.includes('—') && t2.indexOf('undefined') === -1);
     const detailButton = findButton(after.out, '展开明细');
     check('13) 找到「展开明细」按钮', detailButton !== undefined);
@@ -984,7 +1041,11 @@ async function runScenario(scenario, mode, src) {
       detailButton.onClick();
       const afterDetail = await flush(panelComp);
       const t3 = afterDetail.out.texts.join('\n');
-      check('13) 明细：top1=null → 「无排名」', t3.includes('无排名'));
+      check('13) 明细：top1 列无值显示 —（无排名不再作为取值）', t3.includes('—'));
+      // OPT-3 再补·件 B：明细表的「无排名」并入**结论列**（top1 列改显示 —），规则与聚合表/检测页一致
+      check('13) 明细：结论列 = 「无可评分回合 · 无排名」（无排名已并入结论列）', t3.includes('无可评分回合 · 无排名'));
+      // 全屏「无排名」恰好 2 处 = 结论为「样本不足」的行数（聚合行 1 + 明细行 1），多一处即扩散
+      check('13) 「无排名」总数 = 2（= 结论为样本不足的行数，无其它来源）', t3.split('无排名').length - 1 === 2, String(t3.split('无排名').length - 1));
       check('13) 明细：decision=unscorable → 「无可评分回合」', t3.includes('无可评分回合'));
       check('13) 明细：probability/agreement=null → —', t3.includes('—'));
       check('13) 明细：validRounds 0 / totalRounds 1', t3.includes('0 / 1'));
@@ -1049,7 +1110,7 @@ async function runScenario(scenario, mode, src) {
     const t2 = after.out.texts.join('\n');
     // 聚合表：被打断行（lastError 非空）显示「被打断（无结果）」，真样本不足行保持原样
     check('15) 聚合表：被打断行显示「被打断（无结果）」', t2.includes('被打断（无结果）'));
-    check('15) 聚合表：真样本不足行仍显示「样本不足，建议增加轮次」', t2.includes('样本不足，建议增加轮次'));
+    check('15) 真样本不足行：结论列=样本不足、原因列=建议增加轮次（各 1 次）', t2.includes('样本不足') && t2.split('建议增加轮次').length - 1 === 1, String(t2.split('建议增加轮次').length - 1));
     check('15) 「样本不足」只出现 1 次（被打断行不再误报样本不足）', t2.split('样本不足').length - 1 === 1, String(t2.split('样本不足').length - 1));
     const detailButton = findButton(after.out, '展开明细');
     check('15) 找到「展开明细」按钮', detailButton !== undefined);
@@ -1060,6 +1121,9 @@ async function runScenario(scenario, mode, src) {
       check('15) 明细：聚合行 + 明细行 = 恰好 2 处「被打断（无结果）」', t3.split('被打断（无结果）').length - 1 === 2, String(t3.split('被打断（无结果）').length - 1));
       check('15) 明细：该行**不出现**「无可评分回合」', t3.includes('无可评分回合') === false);
       check('15) 明细：失败原因列显示 error 原文（未被吞掉）', t3.includes('interrupted: 上一次运行未完成（宿主进程已重启，无结果）'));
+      // OPT-3 再补·件 B：明细结论列的「无排名」不得扩散到被打断行（精确计数）
+      check('15) 明细：被打断行结论不带「无排名」', t3.split('被打断（无结果） · 无排名').length - 1 === 0, String(t3.split('被打断（无结果） · 无排名').length - 1));
+      check('15) 「无排名」总数 = 1（只有聚合表那条样本不足行）', t3.split('无排名').length - 1 === 1, String(t3.split('无排名').length - 1));
       check('15) 明细：仍无字面量 undefined', t3.indexOf('undefined') === -1);
     }
   }
@@ -1072,6 +1136,77 @@ async function runScenario(scenario, mode, src) {
     check('16) 措辞说明"结果可能没存下来"', t2.includes('这次检测的结果可能没有存下来'));
     check('16) 带上失败时刻', t2.includes('2026/11/3') || t2.includes(writeError.at));
     check('16) 未白屏、未落 PageBoundary', t2.includes('本页面渲染出错') === false && after.out.elements > 50);
+  }
+  if (scenario === 'probabilityStates') {
+    switchTab(mounted.out, HISTORY_TAB_LABEL);
+    const after = await flush(panelComp);
+    const t2 = after.out.texts.join('\n');
+    check('19) 聚合行 null+unavailable → 「—（未校准）」', t2.includes('—（未校准）'));
+    // 自检 3：全站「无排名」总数必须 = 结论为「样本不足」的行数（本场景全为稳定 ⇒ 必须 0）
+    check('19) 稳定行不产生「无排名」（本场景总数 0）', t2.split('无排名').length - 1 === 0, String(t2.split('无排名').length - 1));
+    check('19) 聚合表下方给出可见说明（不只 tooltip）', t2.includes(CALIB_NOTE));
+    const detailButton = findButton(after.out, '展开明细');
+    check('19) 找到「展开明细」按钮', detailButton !== undefined);
+    if (detailButton !== undefined) {
+      detailButton.onClick();
+      const afterDetail = await flush(panelComp);
+      const t3 = afterDetail.out.texts.join('\n');
+      // 明细里 4 条记录：只有 1 条是你"未校准"；reference_calibrated+null 与字段缺失都必须是纯 —
+      check('19) 明细：unavailable 行显示「—（未校准）」', t3.includes('—（未校准）'));
+      check('19) 「—（未校准）」恰好 2 处（聚合 1 + 明细 1）', t3.split('—（未校准）').length - 1 === 2, String(t3.split('—（未校准）').length - 1));
+      check('19) 说明文字恰好 2 处（聚合脚注 + 明细脚注）', t3.split(CALIB_NOTE).length - 1 === 2, String(t3.split(CALIB_NOTE).length - 1));
+      check(
+        '19) 只有 unavailable 那一格带 tooltip（reference_calibrated/缺失都不带）',
+        afterDetail.out.hosts.filter((h) => h.props !== undefined && h.props.title === CALIB_NOTE).length === 2,
+        String(afterDetail.out.hosts.filter((h) => h.props !== undefined && h.props.title === CALIB_NOTE).length),
+      );
+      check('19) 明细表头已从 decision 改为「结论」', t3.includes('结论') && t3.includes('decision') === false);
+      check('19) 数字行不受影响（91.0% 原样，格式未变）', t3.includes('91.0%'));
+      check('19) 明细渲染后仍无字面量 undefined', t3.indexOf('undefined') === -1);
+    }
+  }
+  if (scenario === 'historyColumns') {
+    switchTab(mounted.out, HISTORY_TAB_LABEL);
+    const after = await flush(panelComp);
+    const t2 = after.out.texts.join('\n');
+    check('20) 旧表头「稳定标记」已消失', t2.includes('稳定标记') === false);
+    check('20) 新表头「结论」「原因」都在', t2.includes('结论') && t2.includes('原因'));
+    check('20) 结论列稳定 = 「稳定」', t2.includes('稳定'));
+    check('20) 结论列样本不足 → 「样本不足 · 无排名」（无排名已移入结论列）', t2.split('样本不足 · 无排名').length - 1 === 1, String(t2.split('样本不足 · 无排名').length - 1));
+    check('20) 原因列样本不足 → 「建议增加轮次」恰好 1 次', t2.split('建议增加轮次').length - 1 === 1, String(t2.split('建议增加轮次').length - 1));
+    // OPT-3 件 B：被打断行**不再**带「无排名」（它本来就没结果，再写一遍是冗余）
+    check('20) 结论列被打断 → 「被打断（无结果）」（不带无排名）恰好 1 处', t2.split('被打断（无结果）').length - 1 === 1, String(t2.split('被打断（无结果）').length - 1));
+    check('20) 「被打断（无结果） · 无排名」必须为 0（无排名不得扩散回被打断行）', t2.split('被打断（无结果） · 无排名').length - 1 === 0, String(t2.split('被打断（无结果） · 无排名').length - 1));
+    // 原因列的 error 摘要：截断显示 + title 全文（用超长 error 才验得出来）
+    const titled = after.out.hosts.filter((h) => h.props !== undefined && h.props.title === INTERRUPTED_LONG_ERROR);
+    check('20) 原因列被打断行带 title（error 全文）', titled.length === 1, String(titled.length));
+    if (titled.length === 1) {
+      const shown = titled[0].props.children;
+      check('20) 原因列显示的是**截断摘要**（非全文、以 … 结尾）', typeof shown === 'string' && shown !== INTERRUPTED_LONG_ERROR && shown.endsWith('…'), String(shown));
+    }
+    check('20) 「无排名」只在样本不足行（共 1 处）', t2.split('无排名').length - 1 === 1, String(t2.split('无排名').length - 1));
+    check('20) 未白屏、未落 PageBoundary', t2.includes('本页面渲染出错') === false && after.out.elements > 50);
+  }
+  if (scenario === 'detectVerdictColumns') {
+    // 检测页（无需切页）：结论 / 原因 与历史页同一判定
+    check('21) 检测页旧表头「稳定标记」已消失', text.includes('稳定标记') === false);
+    check('21) 检测页新表头「结论」「原因」都在', text.includes('结论') && text.includes('原因'));
+    check('21) 稳定行 → 结论「稳定」', text.includes('稳定'));
+    check('21) 样本不足行 → 结论「样本不足 · 无排名」恰好 1 处', text.split('样本不足 · 无排名').length - 1 === 1, String(text.split('样本不足 · 无排名').length - 1));
+    check('21) 被打断行 → 结论「被打断（无结果）」恰好 1 处', text.split('被打断（无结果）').length - 1 === 1, String(text.split('被打断（无结果）').length - 1));
+    check('21) 「被打断（无结果） · 无排名」为 0（无排名不得扩散）', text.split('被打断（无结果） · 无排名').length - 1 === 0, String(text.split('被打断（无结果） · 无排名').length - 1));
+    check('21) 「无排名」总数 = 1（只在样本不足行的结论里）', text.split('无排名').length - 1 === 1, String(text.split('无排名').length - 1));
+    check('21) 原因列样本不足 → 「建议增加轮次」恰好 1 处', text.split('建议增加轮次').length - 1 === 1, String(text.split('建议增加轮次').length - 1));
+    // OPT-3 再补·件 A：检测页原因列**不重复** error（完整 error 已在左邻「失败原因」列）
+    check(
+      '21) 检测页原因列不给被打断行重复 error（带该 title 的单元格必须为 0）',
+      mounted.out.hosts.filter((h) => h.props !== undefined && h.props.title === INTERRUPTED_LONG_ERROR).length === 0,
+      String(mounted.out.hosts.filter((h) => h.props !== undefined && h.props.title === INTERRUPTED_LONG_ERROR).length),
+    );
+    check('21) 检测页原因列不出现 error 截断摘要', text.includes(INTERRUPTED_LONG_ERROR.slice(0, 40) + '…') === false);
+    check('21) 但完整 error 仍在「失败原因」列（没有被连带删掉）', text.includes(INTERRUPTED_LONG_ERROR));
+    check('21) 数字置信度不受影响（91.0%）', text.includes('91.0%'));
+    check('21) 未白屏、未落 PageBoundary', text.includes('本页面渲染出错') === false && mounted.out.elements > 50);
   }
   if (scenario === 'hostActiveRunDead') {
     check('17) 出现「检测到上次有一个任务未完成」横幅', text.includes('检测到上次有一个任务未完成（宿主重启前启动，无结果）'));

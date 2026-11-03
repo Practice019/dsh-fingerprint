@@ -430,7 +430,7 @@ function fakeRun(overrides = {}) {
   };
 }
 
-/** 造一个聚合结果（camelCase，§9.1 形状）。 */
+/** 造一个聚合结果（camelCase，§9.1 形状 —— **顶层数值字段是 `confidence`**）。 */
 function fakeAggregate(overrides = {}) {
   return {
     decision: 'scored',
@@ -438,11 +438,12 @@ function fakeAggregate(overrides = {}) {
     predictionName: 'P One',
     family: 'fam',
     familyName: 'Fam Name',
-    probability: 0.9,
+    confidence: 0.9,
     agreement: 1,
     stability: 'stable',
     validRounds: 3,
     totalRounds: 3,
+    probabilityStatus: null,
     ...overrides,
   };
 }
@@ -464,7 +465,7 @@ function fakeCapture() {
   };
 }
 
-test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3（17 键，camelCase 直映）', () => {
+test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3（18 键，camelCase 直映）', () => {
   const run = fakeRun({
     results: [
       { provider: 'provider_a', model: 'm-a', aggregate: fakeAggregate() },
@@ -474,7 +475,7 @@ test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3�
   const records = buildHistoryRecords(run);
   assert.equal(records.length, 2);
   assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS, '键集合与顺序都要逐字对齐契约');
-  assert.equal(Object.keys(records[0]).length, 17);
+  assert.equal(Object.keys(records[0]).length, 18);
   assert.equal(records[0].v, 1);
   assert.equal(records[0].ts, '2026-11-02T06:30:00.000Z', 'ts 用 finishedAt 的 ISO');
   assert.equal(records[0].runId, 'r-9');
@@ -684,11 +685,11 @@ function fakeSidecar(descriptor) {
 /** 静默 ctx（logger.warn 不计分）。 */
 const quietCtx = () => ({ logger: { warn() {} } });
 
-test('FIX-A2①：buildInterruptedRecords —— 2 目标 → 2 条，17 键逐字对齐 §55.5 B 的冻结取值', () => {
+test('FIX-A2①：buildInterruptedRecords —— 2 目标 → 2 条，18 键逐字对齐 §55.5 B 的冻结取值（§61 后 +probabilityStatus）', () => {
   const records = buildInterruptedRecords(deadDescriptor());
   assert.equal(records.length, 2);
   assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS, '键集合与顺序都要逐字对齐');
-  assert.equal(Object.keys(records[0]).length, 17);
+  assert.equal(Object.keys(records[0]).length, 18);
   assert.equal(records[0].v, 1);
   assert.equal(records[0].ts, '2026-11-03T00:40:00.000Z', 'ts 取自 descriptor.startedAt');
   assert.equal(records[0].runId, 'r-dead');
@@ -1098,4 +1099,140 @@ test('FIX-A2⑨：侧车写/清与恢复的失败路径都只留痕、不抛', a
     historyState.lastHistoryError = before;
     await clearHistory();
   }
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// OPT-2（契约 §61）：probabilityStatus 贯通
+// ══════════════════════════════════════════════════════════════════════════
+
+test('OPT-2⑥：buildHistoryRecords 带出 probabilityStatus（合法值 / 缺失 / 非法 / aggregate 为 null）', () => {
+  const base = {
+    runId: 'r-opt2',
+    options: { rounds: 3, count: 3, parallel: 3, strict: false },
+    targets: [{ provider: 'provider_a', model: 'm-a' }],
+    finishedAt: Date.parse('2026-11-03T02:00:00.000Z'),
+    error: null,
+  };
+  const withAggregate = (aggregate) => buildHistoryRecords({ ...base, results: [{ provider: 'provider_a', model: 'm-a', aggregate }] });
+
+  // ① 两个非 null 合法值都能往返
+  for (const value of ['reference_calibrated', 'unavailable']) {
+    const records = withAggregate(fakeAggregate({ probabilityStatus: value }));
+    assert.equal(records[0].probabilityStatus, value, `${value} 必须原样带出`);
+    assert.equal(Object.keys(records[0]).length, 18);
+    assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS);
+  }
+  // ② 显式 null
+  assert.equal(withAggregate(fakeAggregate({ probabilityStatus: null }))[0].probabilityStatus, null);
+  // ③ 缺失该键（旧聚合对象）⇒ null
+  const withoutKey = fakeAggregate();
+  delete withoutKey.probabilityStatus;
+  assert.equal(withAggregate(withoutKey)[0].probabilityStatus, null);
+  // ④ 非法值 ⇒ null（不透传）
+  for (const bad of ['foo', 'REFERENCE_CALIBRATED', 1, true, { value: 'unavailable' }, ['unavailable']]) {
+    assert.equal(withAggregate(fakeAggregate({ probabilityStatus: bad }))[0].probabilityStatus, null, `${JSON.stringify(bad)} 必须归 null`);
+  }
+  // ⑤ aggregate 为 null（取消/失败）⇒ null，且不抛
+  assert.equal(withAggregate(null)[0].probabilityStatus, null);
+  // ⑥ 兼容别名：调用方直接塞 `probability`（旧夹具/旧调用方）仍能映射
+  assert.equal(withAggregate({ decision: 'scored', probability: 0.7 })[0].probability, 0.7);
+});
+
+test('OPT-2⑦：run.results[] 透传该字段（真实 aggregateRounds）；同时给 OD-1 的 confidence→probability 映射加回归网', async () => {
+  const { aggregateRounds } = await import('../lib/aggregate.js'); // 只读使用，不改它
+  const analysis = {
+    decision: 'scored',
+    prediction: 'p-1',
+    predictionName: 'P One',
+    probability: 0.9,
+    agreement: 1,
+    stability: 'stable',
+    probability_status: 'reference_calibrated',
+  };
+  const aggregate = aggregateRounds([{ analysis, error: null }, { analysis: { ...analysis }, error: null }]);
+
+  // ① 真实聚合对象里已有该字段（W5 的 §61 改动已落地）
+  assert.equal(aggregate.probabilityStatus, 'reference_calibrated');
+  // ② results[] 按**现有结构**原样携带（键名未改：仍是 results[].aggregate）
+  const run = {
+    runId: 'r-opt2',
+    options: { rounds: 2, count: 2, parallel: 2, strict: false },
+    targets: [{ provider: 'provider_a', model: 'm-a' }],
+    results: [{ provider: 'provider_a', model: 'm-a', aggregate }],
+    error: null,
+    finishedAt: Date.now(),
+  };
+  assert.equal(run.results[0].aggregate.probabilityStatus, 'reference_calibrated', '结果对象里必须能读到');
+  assert.equal(Object.hasOwn(run.results[0].aggregate, 'confidence'), true, '既有键名不变（confidence）');
+
+  // ③ 记录里也带出；且聚合的 confidence 被正确映射成记录的 probability（OD-1 回归网）
+  const records = buildHistoryRecords(run);
+  assert.equal(records[0].probabilityStatus, 'reference_calibrated');
+  assert.equal(records[0].probability, 0.9, '聚合的 confidence 必须映射到记录的 probability（否则恒为 null）');
+  assert.equal(records[0].decision, 'scored');
+
+  // ④ 未校准：status=unavailable 且 confidence 为 null ⇒ 两者都可解释（§61.4 C 第 2 行）
+  const uncalibrated = aggregateRounds([
+    { analysis: { ...analysis, probability: null, probability_status: 'unavailable' }, error: null },
+  ]);
+  assert.equal(uncalibrated.probabilityStatus, 'unavailable');
+  const rec2 = buildHistoryRecords({ ...run, runId: 'r-unc', results: [{ provider: 'provider_a', model: 'm-a', aggregate: uncalibrated }] });
+  assert.equal(rec2[0].probabilityStatus, 'unavailable');
+  assert.equal(rec2[0].probability, null, '未校准时 confidence 为 null');
+});
+
+test('OPT-2 追加1：/history/models 每行带 lastProbabilityStatus（与 lastError 同源、字段永不省略）', async () => {
+  await clearHistory();
+  const one = (runId, provider, model, status, finishedAt) =>
+    buildHistoryRecords({
+      ...fakeRun({
+        runId,
+        finishedAt: Date.parse(finishedAt),
+        targets: [{ provider, model }],
+        results: [{ provider, model, aggregate: fakeAggregate({ probabilityStatus: status }) }],
+      }),
+    });
+  // m-a：最新那条 unavailable；m-b：最新那条 reference_calibrated；m-c：最新那条 null
+  await appendRecords(one('r-a1', 'provider_a', 'm-a', 'unavailable', '2026-11-03T03:00:00.000Z'));
+  await appendRecords(one('r-b1', 'provider_b', 'm-b', 'reference_calibrated', '2026-11-03T03:01:00.000Z'));
+  await appendRecords(one('r-c1', 'provider_c', 'm-c', null, '2026-11-03T03:02:00.000Z'));
+
+  const capture = fakeCapture();
+  await routeHistoryModels(capture.response);
+  const body = JSON.parse(capture.body());
+  const byModel = new Map(body.models.map((row) => [row.model, row]));
+
+  // 字段永不省略
+  for (const row of body.models) {
+    assert.ok(Object.hasOwn(row, 'lastProbabilityStatus'), `${row.model} 必须带 lastProbabilityStatus 字段`);
+    assert.ok(Object.hasOwn(row, 'lastError'), `${row.model} 必须带 lastError 字段`);
+  }
+  assert.equal(byModel.get('m-a').lastProbabilityStatus, 'unavailable');
+  assert.equal(byModel.get('m-b').lastProbabilityStatus, 'reference_calibrated');
+  assert.equal(byModel.get('m-c').lastProbabilityStatus, null, 'null 是合法值（不是"字段缺失"）');
+
+  // 来一条更新的 null ⇒ 跟着回落（不得回退到 unavailable）
+  await appendRecords(one('r-a2', 'provider_a', 'm-a', null, '2026-11-03T03:10:00.000Z'));
+  const capture2 = fakeCapture();
+  await routeHistoryModels(capture2.response);
+  const body2 = JSON.parse(capture2.body());
+  const a2 = body2.models.find((row) => row.model === 'm-a');
+  assert.equal(a2.lastProbabilityStatus, null, '最新那条是 null ⇒ null');
+  assert.equal(a2.runs, 2);
+
+  // 非法值不得透传（走 history.js 白名单 ⇒ 读出来就是 null）
+  await appendRecords(one('r-b2', 'provider_b', 'm-b', 'foo', '2026-11-03T03:11:00.000Z'));
+  const capture3 = fakeCapture();
+  await routeHistoryModels(capture3.response);
+  const b3 = JSON.parse(capture3.body());
+  assert.equal(b3.models.find((row) => row.model === 'm-b').lastProbabilityStatus, null, '非法值 ⇒ null');
+
+  // 兜底：注入的 aggregator 若不给该字段，路由必须自己补上（键存在 + 取最新记录的值）
+  const capture4 = fakeCapture();
+  await routeHistoryModels(capture4.response, readHistory, async () => [{ provider: 'provider_a', model: 'm-a', lastTs: 'x', runs: 2 }]);
+  const b4 = JSON.parse(capture4.body());
+  assert.ok(Object.hasOwn(b4.models[0], 'lastProbabilityStatus'), '字段永不省略（兜底路径）');
+  assert.equal(b4.models[0].lastProbabilityStatus, null, '该模型最新记录是 null ⇒ 兜底也是 null');
+
+  await clearHistory();
 });

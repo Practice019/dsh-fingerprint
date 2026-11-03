@@ -70,7 +70,7 @@ function record(overrides = {}) {
   }
 }
 
-/** §29.3 冻结的 17 个键。 */
+/** §29.3 + §61.4 B 冻结的 18 个键（原 17 + `probabilityStatus`，追加在最后）。 */
 const RECORD_KEYS = [
   'v',
   'ts',
@@ -89,6 +89,7 @@ const RECORD_KEYS = [
   'totalRounds',
   'options',
   'error',
+  'probabilityStatus',
 ]
 
 // ── 0. 导出常量 ────────────────────────────────────────────────────────────
@@ -402,11 +403,12 @@ test('8) aggregateByModel：同模型 3 条 → runs=3，last* 取最新那条�
     assert.equal(m2.runs, 1)
     assert.equal(m2.lastPrediction, 'P2')
 
-    // 键集合恰好 8 个
+    // 键集合恰好 9 个（原 8 + §61.4 B 的 lastProbabilityStatus）
     assert.deepEqual(Object.keys(m1).sort(), [
       'lastDecision',
       'lastPrediction',
       'lastProbability',
+      'lastProbabilityStatus',
       'lastStability',
       'lastTs',
       'model',
@@ -461,7 +463,7 @@ test('10) §29.2 白名单：rawText / challenges / samples / apiKey 等多余�
 
     const back = await readHistory()
     assert.equal(back.length, 1)
-    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort(), '键集合必须恰好是 §29.3 的 17 个')
+    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort(), '键集合必须恰好是 §29.3 + §61.4 B 的 18 个')
   })
 })
 
@@ -875,5 +877,137 @@ test('20) 侧车与 history 隔离：写侧车不得在被覆盖的 history 目�
       else process.env.DSH_FINGERPRINT_HISTORY = previousHistory
       await rm(historyDir, { recursive: true, force: true }).catch(() => {})
     }
+  })
+})
+
+// ── 18–22. §61.4 B：probabilityStatus（17 → 18 键）──────────────────────────
+
+test('18) §61：probabilityStatus 三值往返（写盘 → 读回，文件里也真的写了）', async () => {
+  await withTemp(async ({ file }) => {
+    const written = await appendRecords([
+      record({ runId: 'r-cal', probabilityStatus: 'reference_calibrated' }),
+      record({ runId: 'r-unavail', probabilityStatus: 'unavailable' }),
+      record({ runId: 'r-null', probabilityStatus: null }),
+    ])
+    assert.equal(written.ok, true)
+    const back = await readHistory({})
+    const byId = new Map(back.map((r) => [r.runId, r]))
+    assert.equal(byId.get('r-cal').probabilityStatus, 'reference_calibrated')
+    assert.equal(byId.get('r-unavail').probabilityStatus, 'unavailable')
+    assert.equal(byId.get('r-null').probabilityStatus, null)
+    const raw = await readFile(file, 'utf8')
+    assert.ok(raw.includes('"reference_calibrated"'), '值必须真的落到文件里')
+    assert.ok(raw.includes('"unavailable"'))
+    // §61 追加 3：`null` 是**合法值** ⇒ 必须作为值写进去（键存在、值为 null），不能省略该键
+    assert.ok(raw.includes('"probabilityStatus":null'), 'null 必须落盘（不是省略键）')
+    assert.equal(raw.split('"probabilityStatus"').length - 1, 3, '三条记录都要有该键')
+  })
+})
+
+test('19) §61：非法值一律归 null（任意字符串 / 大小写变体 / 数字 / 对象 / 数组 / 布尔）', async () => {
+  await withTemp(async () => {
+    const bads = [
+      ['任意字符串', 'foo'],
+      ['大小写变体', 'REFERENCE_CALIBRATED'],
+      ['近似值', 'reference'],
+      ['数字', 1],
+      ['对象', { value: 'reference_calibrated' }],
+      ['数组', ['unavailable']],
+      ['布尔', true],
+      ['空串', ''],
+    ]
+    for (const [label, bad] of bads) {
+      await appendRecords([record({ runId: `r-bad-${label}`, probabilityStatus: bad })])
+    }
+    const back = await readHistory({})
+    assert.equal(back.length, bads.length)
+    for (const one of back) {
+      assert.equal(one.probabilityStatus, null, `${one.runId} 的非法值必须归 null，实际 ${JSON.stringify(one.probabilityStatus)}`)
+    }
+  })
+})
+
+test('20) §61：旧记录（完全没有该键）⇒ 读出为 null 且**不判为损坏**（向后兼容硬要求）', async () => {
+  await withTemp(async ({ file, dir }) => {
+    await mkdir(dir, { recursive: true }) // withTemp 不建目录；本用例直接写文件，须自己建
+    // 手写一行真正的"旧版记录"：17 键，没有 probabilityStatus
+    const legacy = {
+      v: 1,
+      ts: '2026-11-01T00:00:00.000Z',
+      runId: 'r-legacy',
+      provider: 'provider_a',
+      model: 'example/text-image',
+      decision: 'scored',
+      prediction: 'p',
+      predictionName: 'P',
+      family: null,
+      familyName: null,
+      probability: 0.5,
+      agreement: 1,
+      stability: 'stable',
+      validRounds: 3,
+      totalRounds: 3,
+      options: { rounds: 3, count: 3, parallel: 3, strict: false },
+      error: null,
+    }
+    await writeFile(file, `${JSON.stringify(legacy)}\n`, 'utf8')
+
+    const stats = await historyStats()
+    assert.equal(stats.error, null, '旧记录不得让整体读取报错')
+    assert.equal(stats.skippedLines, 0, '旧记录**不得**被判为损坏行')
+    assert.equal(stats.count, 1)
+
+    const back = await readHistory({})
+    assert.equal(back.length, 1, '旧记录必须仍能被读出')
+    assert.equal(back[0].probabilityStatus, null, '缺键 ⇒ null（未知），不是损坏')
+    assert.equal(back[0].probability, 0.5, '既有 17 键语义不受影响')
+    assert.equal(back[0].decision, 'scored')
+    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort(), '读出后键集合是 18 键')
+  })
+})
+
+test('21) §61：18 键白名单 —— 缺键归 null 不拒绝、多余键一律丢弃、键集合恰好 18', async () => {
+  await withTemp(async ({ file }) => {
+    const partial = record()
+    const withExtra = { ...partial, extraField: 'x', apiKey: 'sk-should-be-dropped', rawText: 'RAW-TEXT', challenges: [1, 2] }
+    await appendRecords([withExtra])
+    const back = await readHistory({})
+    assert.equal(back.length, 1, '缺 probabilityStatus 不得导致整条被拒；多余字段不得导致整条被拒')
+    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort(), '键集合必须恰好是 18 个')
+    assert.equal(back[0].probabilityStatus, null)
+    assert.equal(Object.hasOwn(back[0], 'apiKey'), false)
+    assert.equal(Object.hasOwn(back[0], 'rawText'), false)
+    assert.equal(Object.hasOwn(back[0], 'challenges'), false)
+    const raw = await readFile(file, 'utf8')
+    assert.ok(!raw.includes('sk-should-be-dropped'), '秘密不得落盘')
+    assert.ok(!raw.includes('RAW-TEXT'))
+  })
+})
+
+test('22) §61：aggregateByModel.lastProbabilityStatus —— 取最新那条；缺该键 ⇒ null（不回退到旧值）', async () => {
+  await withTemp(async () => {
+    await appendRecords([
+      record({ runId: 'r-1', ts: '2026-11-02T06:00:00.000Z', probabilityStatus: 'unavailable' }),
+      record({ runId: 'r-2', ts: '2026-11-02T06:01:00.000Z', probabilityStatus: 'reference_calibrated' }),
+      record({ runId: 'r-x', ts: '2026-11-02T06:03:00.000Z', provider: 'provider_b', model: 'example/text-image-2' }),
+    ])
+    const rows = await aggregateByModel()
+    const a = rows.find((r) => r.model === 'example/text-image')
+    assert.equal(a.lastProbabilityStatus, 'reference_calibrated', '最新那条的值')
+    assert.equal(a.runs, 2)
+    const b = rows.find((r) => r.model === 'example/text-image-2')
+    assert.equal(b.lastProbabilityStatus, null, '唯一那条没给该键 ⇒ null')
+
+    // 再来一条更新的 null ⇒ 必须跟着变成 null（不回退到上一条的 reference_calibrated）
+    await appendRecords([record({ runId: 'r-3', ts: '2026-11-02T06:04:00.000Z', probabilityStatus: null })])
+    const rows2 = await aggregateByModel()
+    const a2 = rows2.find((r) => r.model === 'example/text-image')
+    assert.equal(a2.lastProbabilityStatus, null, '最新那条是 null ⇒ null（不得回退）')
+    assert.equal(a2.runs, 3)
+
+    // 再来一条 unavailable ⇒ 跟着变成 unavailable
+    await appendRecords([record({ runId: 'r-4', ts: '2026-11-02T06:05:00.000Z', probabilityStatus: 'unavailable' })])
+    const rows3 = await aggregateByModel()
+    assert.equal(rows3.find((r) => r.model === 'example/text-image').lastProbabilityStatus, 'unavailable')
   })
 })

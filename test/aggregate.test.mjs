@@ -26,8 +26,19 @@ function candidate(model, { score = 1, probability = 0.5, family = 'fam', family
 /**
  * 构造一个完整的 Analysis 对象（字段集与 lmfpd-sdk 的 Analysis 接口对齐），
  * 便于验证实现不会误用 field 名。
+ *
+ * §61 起新增两个**可选**参数（纯增量，默认值与原先硬编码的值完全相同）：
+ *   - `probabilityStatus`：写进 `probability_status` 的值，默认 `'reference_calibrated'`
+ *   - `omitProbabilityStatus`：`true` 时**完全不写该键**，用来模拟「旧数据 / SDK 未给」
  */
-function makeAnalysis({ prediction, results = [], probability = 0.9, decision = 'scored' }) {
+function makeAnalysis({
+  prediction,
+  results = [],
+  probability = 0.9,
+  decision = 'scored',
+  probabilityStatus = 'reference_calibrated',
+  omitProbabilityStatus = false,
+}) {
   return {
     decision,
     prediction,
@@ -37,7 +48,7 @@ function makeAnalysis({ prediction, results = [], probability = 0.9, decision = 
     results,
     ranking_score: results.length > 0 ? results[0].score : null,
     probability,
-    probability_status: 'reference_calibrated',
+    ...(omitProbabilityStatus ? {} : { probability_status: probabilityStatus }),
     probability_scope: null,
     calibration: null,
     used_outputs: 3,
@@ -50,8 +61,15 @@ function makeAnalysis({ prediction, results = [], probability = 0.9, decision = 
 }
 
 /** 造一个「有效回合」：top1 = prediction，榜单为 results。 */
-function scoredRound(prediction, results, { probability = 0.9 } = {}) {
-  return { analysis: makeAnalysis({ prediction, results, probability }), error: null }
+function scoredRound(
+  prediction,
+  results,
+  { probability = 0.9, probabilityStatus = 'reference_calibrated', omitProbabilityStatus = false } = {},
+) {
+  return {
+    analysis: makeAnalysis({ prediction, results, probability, probabilityStatus, omitProbabilityStatus }),
+    error: null,
+  }
 }
 
 /** 两个候选的常规榜单：top1 分数高，第二名分数低。 */
@@ -433,4 +451,99 @@ test('10) 不修改入参（纯函数）', () => {
 
   aggregateRounds(rounds)
   assert.equal(JSON.stringify(rounds), snapshot, 'aggregateRounds 不得修改传入的 rounds')
+})
+
+// ══ §61 probabilityStatus ═══════════════════════════════════════════════════
+
+test('16) §61 有效回合全带 unavailable ⇒ probabilityStatus=unavailable，confidence 仍 null', () => {
+  const rounds = [0, 1, 2].map(() =>
+    scoredRound('A', pairBoard('A', 'B'), { probability: null, probabilityStatus: 'unavailable' }),
+  )
+  const agg = aggregateRounds(rounds)
+
+  assert.equal(agg.validRounds, 3, '3 轮都是有效回合（decision=scored 且 prediction 非空）')
+  assert.equal(agg.probabilityStatus, 'unavailable')
+  assert.equal(agg.confidence, null, 'confidence 仍走既有 median 逻辑：没有有限数值 ⇒ null')
+  assert.equal(agg.decision, 'scored', '既有判定不受影响')
+})
+
+test('17) §61 calibrated ⇒ 透出该值，且 probability / confidence 的既有算法不变', () => {
+  const board = [candidate('A', { score: 10, probability: 0.8 }), candidate('B', { score: 5, probability: 0.2 })]
+  const rounds = [
+    scoredRound('A', board, { probability: 0.7, probabilityStatus: 'reference_calibrated' }),
+    scoredRound('A', board, { probability: 0.9, probabilityStatus: 'reference_calibrated' }),
+  ]
+  const agg = aggregateRounds(rounds)
+
+  assert.equal(agg.probabilityStatus, 'reference_calibrated')
+
+  const rowA = agg.ranking.find((r) => r.model === 'A')
+  assert.equal(rowA.probability, 0.8, 'ranking 概率仍走平均值逻辑（两轮都是 0.8）')
+  assert.ok(Math.abs(agg.confidence - 0.8) < EPS, `confidence 应是 median(0.7, 0.9) = 0.8，实际 ${agg.confidence}`)
+})
+
+test('18) §61 混合（1 calibrated + 2 unavailable）⇒ reference_calibrated（任一即算）', () => {
+  const rounds = [
+    scoredRound('A', pairBoard('A', 'B'), { probabilityStatus: 'unavailable' }),
+    scoredRound('A', pairBoard('A', 'B'), { probabilityStatus: 'reference_calibrated' }),
+    scoredRound('A', pairBoard('A', 'B'), { probabilityStatus: 'unavailable' }),
+  ]
+  assert.equal(aggregateRounds(rounds).probabilityStatus, 'reference_calibrated')
+})
+
+test('19) §61 无有效回合（全 unscorable）⇒ null（即使 analysis 带着该字段）', () => {
+  const rounds = [0, 1, 2].map(() => ({
+    analysis: makeAnalysis({
+      prediction: '',
+      results: [],
+      probability: null,
+      decision: 'unscorable',
+      probabilityStatus: 'reference_calibrated',
+    }),
+    error: 'unscorable',
+  }))
+  const agg = aggregateRounds(rounds)
+
+  assert.equal(agg.validRounds, 0)
+  assert.equal(agg.decision, 'unscorable')
+  assert.equal(agg.probabilityStatus, null, '判定只看有效回合 ⇒ 无效回合带什么都没用')
+})
+
+test('20) §61 analysis 为 null 的回合不参与判定 ⇒ 全 null 时结果为 null', () => {
+  const rounds = [{ analysis: null, error: 'boom' }, {}, { analysis: 'not-an-object' }]
+  const agg = aggregateRounds(rounds)
+
+  assert.equal(agg.validRounds, 0)
+  assert.equal(agg.probabilityStatus, null)
+})
+
+test('21) §61 旧数据：analysis 完全没有 probability_status 键 ⇒ null（不臆造）', () => {
+  const rounds = [0, 1].map(() => scoredRound('A', pairBoard('A', 'B'), { omitProbabilityStatus: true }))
+  const agg = aggregateRounds(rounds)
+
+  assert.equal(agg.validRounds, 2, '回合仍然有效')
+  assert.equal(agg.decision, 'scored')
+  assert.equal(agg.confidence, 0.9, '其它字段照常')
+  assert.equal(agg.probabilityStatus, null, 'SDK 未给该字段 ⇒ null，绝不为了「看起来有数据」而臆造')
+})
+
+test('22) §61 未知值 ⇒ unavailable（带该字段但非 calibrated 一律归为不可用）', () => {
+  const rounds = [scoredRound('A', pairBoard('A', 'B'), { probabilityStatus: 'something-else' })]
+  assert.equal(aggregateRounds(rounds).probabilityStatus, 'unavailable')
+})
+
+test('23) §61 部分轮带该字段、部分轮完全没有 ⇒ unavailable（是「任一带」不是「全部带」）', () => {
+  const rounds = [
+    scoredRound('A', pairBoard('A', 'B'), { probabilityStatus: 'unavailable' }),
+    scoredRound('A', pairBoard('A', 'B'), { omitProbabilityStatus: true }),
+    scoredRound('A', pairBoard('A', 'B'), { omitProbabilityStatus: true }),
+  ]
+  const agg = aggregateRounds(rounds)
+
+  assert.equal(agg.validRounds, 3, '三轮都有效（该字段有无不影响回合有效性）')
+  assert.equal(
+    agg.probabilityStatus,
+    'unavailable',
+    '只要**任一**轮带该字段就算「不可用」；不要求全部轮都带',
+  )
 })
