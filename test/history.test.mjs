@@ -70,7 +70,7 @@ function record(overrides = {}) {
   }
 }
 
-/** §29.3 + §61.4 B 冻结的 18 个键（原 17 + `probabilityStatus`，追加在最后）。 */
+/** §29.3 + §61.4 B + §64.4 冻结的 19 个键（原 17 + probabilityStatus + origin，都追加在最后）。 */
 const RECORD_KEYS = [
   'v',
   'ts',
@@ -90,6 +90,7 @@ const RECORD_KEYS = [
   'options',
   'error',
   'probabilityStatus',
+  'origin',
 ]
 
 // ── 0. 导出常量 ────────────────────────────────────────────────────────────
@@ -669,9 +670,10 @@ test('13) 侧车：写入后逐字段读回一致，且落盘可解析', async (
     assert.deepEqual(back.options, { rounds: 3, count: 3, parallel: 3, strict: true })
     assert.deepEqual(back.targets, [{ provider: 'provider_a', model: 'example/text-image' }])
 
-    // 键集合恰好 7 个（§55 冻结形状）
+    // 键集合恰好 8 个（§55 冻结形状 + §64.4 的 origin）
     assert.deepEqual(Object.keys(back).sort(), [
       'options',
+      'origin',
       'pid',
       'processStartedAt',
       'runId',
@@ -962,11 +964,11 @@ test('20) §61：旧记录（完全没有该键）⇒ 读出为 null 且**不判
     assert.equal(back[0].probabilityStatus, null, '缺键 ⇒ null（未知），不是损坏')
     assert.equal(back[0].probability, 0.5, '既有 17 键语义不受影响')
     assert.equal(back[0].decision, 'scored')
-    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort(), '读出后键集合是 18 键')
+    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort(), '读出后键集合是 19 键（17 键旧记录也补齐）')
   })
 })
 
-test('21) §61：18 键白名单 —— 缺键归 null 不拒绝、多余键一律丢弃、键集合恰好 18', async () => {
+test('21) §61：19 键白名单 —— 缺键归默认、多余键一律丢弃、键集合恰好 19', async () => {
   await withTemp(async ({ file }) => {
     const partial = record()
     const withExtra = { ...partial, extraField: 'x', apiKey: 'sk-should-be-dropped', rawText: 'RAW-TEXT', challenges: [1, 2] }
@@ -1009,5 +1011,161 @@ test('22) §61：aggregateByModel.lastProbabilityStatus —— 取最新那条�
     await appendRecords([record({ runId: 'r-4', ts: '2026-11-02T06:05:00.000Z', probabilityStatus: 'unavailable' })])
     const rows3 = await aggregateByModel()
     assert.equal(rows3.find((r) => r.model === 'example/text-image').lastProbabilityStatus, 'unavailable')
+  })
+})
+
+// ── 23–27. §64.4：origin（18 → 19 键；侧车 7 → 8 键）────────────────────────
+
+test('23) §64.4：19 键白名单 —— 缺 origin 归默认、显式 null 保持 null、多余键丢弃、键集合恰好 19', async () => {
+  await withTemp(async ({ file }) => {
+    // ① 写入路径：**新建记录**缺 origin ⇒ 'ui'（"新建记录必须有值"）
+    const noOrigin = record({ runId: 'r-no-origin' })
+    delete noOrigin.origin
+    const withExtra = { ...record({ runId: 'r-extra', origin: 'probe' }), extraField: 'x', apiKey: 'sk-should-be-dropped', rawText: 'RAW' }
+    // ② 显式 null（中断恢复用的"未知"）⇒ 必须是 null，**不得**被补成 'ui'
+    const explicitNull = record({ runId: 'r-null-origin', origin: null })
+    await appendRecords([noOrigin, withExtra, explicitNull])
+
+    const back = await readHistory({})
+    const byId = new Map(back.map((r) => [r.runId, r]))
+    assert.equal(back.length, 3, '三种情况都不得被拒')
+    for (const one of back) {
+      assert.deepEqual(Object.keys(one).sort(), RECORD_KEYS.slice().sort(), '键集合必须恰好 19 个')
+    }
+    assert.equal(byId.get('r-no-origin').origin, 'ui', '写入路径缺省 ⇒ ui')
+    assert.equal(byId.get('r-null-origin').origin, null, '显式 null ⇒ null（未知，绝不伪装成 ui）')
+    assert.equal(byId.get('r-extra').origin, 'probe')
+    assert.equal(Object.hasOwn(back[0], 'apiKey'), false)
+    const raw = await readFile(file, 'utf8')
+    assert.ok(!raw.includes('sk-should-be-dropped'))
+    assert.ok(raw.includes('"origin":null'), 'null 必须作为值落盘（不是省略键）')
+  })
+})
+
+test('24) §64.4：旧记录（18 键、无 origin）⇒ 读出 null，且 skippedLines=0 / stats.error=null', async () => {
+  await withTemp(async ({ file, dir }) => {
+    await mkdir(dir, { recursive: true })
+    const legacy = {
+      v: 1,
+      ts: '2026-11-01T00:00:00.000Z',
+      runId: 'r-legacy18',
+      provider: 'provider_a',
+      model: 'example/text-image',
+      decision: 'scored',
+      prediction: 'p',
+      predictionName: 'P',
+      family: null,
+      familyName: null,
+      probability: 0.5,
+      agreement: 1,
+      stability: 'stable',
+      validRounds: 3,
+      totalRounds: 3,
+      options: { rounds: 3, count: 3, parallel: 3, strict: false },
+      error: null,
+      probabilityStatus: 'unavailable',
+    }
+    assert.equal(Object.keys(legacy).length, 18, '夹具必须是 18 键的旧记录')
+    await writeFile(file, `${JSON.stringify(legacy)}\n`, 'utf8')
+
+    const stats = await historyStats()
+    assert.equal(stats.error, null)
+    assert.equal(stats.skippedLines, 0, '旧记录**不得**被判为损坏')
+    const back = await readHistory({})
+    assert.equal(back.length, 1)
+    assert.equal(back[0].origin, null, '缺 origin ⇒ null（未知），**不得**当作 ui')
+    assert.equal(back[0].probabilityStatus, 'unavailable', '既有 §61 字段不受影响')
+    assert.equal(back[0].probability, 0.5)
+    assert.deepEqual(Object.keys(back[0]).sort(), RECORD_KEYS.slice().sort())
+  })
+})
+
+test('25) §64.4：三个合法值往返；读取路径的非法值 ⇒ null', async () => {
+  await withTemp(async ({ file, dir }) => {
+    for (const value of ['ui', 'cli', 'probe']) {
+      await appendRecords([record({ runId: `r-${value}`, origin: value })])
+    }
+    // 手写一条被改坏的记录：origin 是非法值 ⇒ 读取路径必须归 null（不透传）
+    await mkdir(dir, { recursive: true })
+    const corrupted = { ...record({ runId: 'r-corrupted' }), origin: 'foo' }
+    await writeFile(file, `${await readFile(file, 'utf8')}${JSON.stringify(corrupted)}\n`, 'utf8')
+
+    const back = await readHistory({})
+    const byId = new Map(back.map((r) => [r.runId, r]))
+    assert.equal(byId.get('r-ui').origin, 'ui')
+    assert.equal(byId.get('r-cli').origin, 'cli')
+    assert.equal(byId.get('r-probe').origin, 'probe')
+    assert.equal(byId.get('r-corrupted').origin, null, '非法值 ⇒ null（读取路径不透传）')
+    assert.equal((await historyStats()).skippedLines, 0)
+  })
+})
+
+test('26) §64.4：侧车放行 origin —— 合法值往返；缺省/非法 ⇒ null（绝不发明 ui）', async () => {
+  await withTempSidecar(async () => {
+    await writeActiveRun({
+      v: 1,
+      runId: 'r-probe-run',
+      startedAt: '2026-11-03T01:00:00.000Z',
+      pid: 1234,
+      processStartedAt: 1762000000000,
+      options: { rounds: 1, count: 1, parallel: 1, strict: false },
+      targets: [{ provider: 'provider_a', model: 'example/text-image' }],
+      origin: 'probe',
+    })
+    const back = await readActiveRun()
+    assert.equal(back.origin, 'probe', '侧车必须原样带上 origin')
+    assert.equal(Object.keys(back).length, 8, '侧车键数 7 → 8')
+
+    // 旧版侧车（没有该字段）⇒ null
+    await writeActiveRun({
+      v: 1,
+      runId: 'r-legacy-run',
+      startedAt: '2026-11-03T01:00:00.000Z',
+      pid: 1234,
+      processStartedAt: 1762000000000,
+      options: { rounds: 1, count: 1, parallel: 1, strict: false },
+      targets: [{ provider: 'provider_a', model: 'example/text-image' }],
+    })
+    const legacy = await readActiveRun()
+    assert.equal(legacy.origin, null, '旧侧车缺字段 ⇒ null（不得伪装成 ui）')
+    // 非法值也 ⇒ null
+    await writeActiveRun({
+      v: 1,
+      runId: 'r-bad-run',
+      startedAt: '2026-11-03T01:00:00.000Z',
+      pid: 1234,
+      processStartedAt: 1762000000000,
+      options: { rounds: 1, count: 1, parallel: 1, strict: false },
+      targets: [{ provider: 'provider_a', model: 'example/text-image' }],
+      origin: 'foo',
+    })
+    assert.equal((await readActiveRun()).origin, null, '侧车里的非法值 ⇒ null')
+  })
+})
+
+test('27) §64.4：aggregateByModel 的行形状不变（仍 9 键、无 origin）；runs 仍是**全部记录**的计数', async () => {
+  await withTemp(async () => {
+    await appendRecords([
+      record({ runId: 'r-ui', origin: 'ui', ts: '2026-11-02T06:00:00.000Z' }),
+      record({ runId: 'r-probe', origin: 'probe', ts: '2026-11-02T06:01:00.000Z' }),
+      record({ runId: 'r-cli', origin: 'cli', ts: '2026-11-02T06:02:00.000Z' }),
+    ])
+    const rows = await aggregateByModel()
+    const row = rows.find((r) => r.model === 'example/text-image')
+    // 我的选择：`aggregateByModel()` **不过滤**（签名冻结、缺省语义 = 全部）⇒ runs 计所有来源。
+    // 按来源分成"真实用户记录"由**路由**的 ?origin= 过滤负责（见 test/index.test.mjs）。
+    assert.equal(row.runs, 3, '缺省语义 = 全部记录（不排除探针）')
+    assert.deepEqual(Object.keys(row).sort(), [
+      'lastDecision',
+      'lastPrediction',
+      'lastProbability',
+      'lastProbabilityStatus',
+      'lastStability',
+      'lastTs',
+      'model',
+      'provider',
+      'runs',
+    ], '行形状不变（9 键，无 origin）')
+    assert.equal(row.lastTs, '2026-11-02T06:02:00.000Z')
   })
 })

@@ -282,6 +282,8 @@ window.__ModuleLoader__.load({
       advanced: "高级选项",
       challenges: "每轮挑战数",
       challengesHint: "1–3，默认 3；严格模式下强制为 3",
+      // §64.4 B：count < 3 只提示、不禁止（SDK 需要恰好 3 条有效回答才给排名与置信度）
+      countLowHint: "SDK 需要恰好 3 条有效回答才能给出排名与置信度；当前设为 {n} 时只会得到「样本不足」。",
       parallel: "并发",
       parallelHint: "1–3，默认 3；同时在跑的轮次数（跨「目标 × 轮次」）",
       runtimeBanner: "运行中",
@@ -311,6 +313,12 @@ window.__ModuleLoader__.load({
       colLastTop1: "最近 top1",
       colWhen: "时间",
       colDetail: "明细",
+      // ── §64.4 A（修正后）：origin 的显示与**客户端**过滤 ─────────────────
+      colOrigin: "来源",
+      originProbe: "探针",
+      originCli: "CLI",
+      hideProbe: "隐藏探针记录",
+      hiddenProbe: "已隐藏 {n} 条探针记录",
       collapse: "收起明细",
       strict: "严格模式",
       strictHint: "不截断，且要求每轮 3 条全部有效",
@@ -448,6 +456,7 @@ window.__ModuleLoader__.load({
       advanced: "Advanced",
       challenges: "Challenges per round",
       challengesHint: "1–3, default 3 (forced to 3 in strict mode)",
+      countLowHint: "The SDK needs exactly 3 valid answers to produce a ranking and confidence; with {n} you will only get \"insufficient samples\".",
       parallel: "Parallel",
       parallelHint: "1–3, default 3; rounds running at the same time (across target x round)",
       runtimeBanner: "Running",
@@ -476,6 +485,11 @@ window.__ModuleLoader__.load({
       colLastTop1: "Last top1",
       colWhen: "Time",
       colDetail: "Detail",
+      colOrigin: "Source",
+      originProbe: "probe",
+      originCli: "CLI",
+      hideProbe: "Hide probe records",
+      hiddenProbe: "{n} probe records hidden",
       collapse: "Collapse",
       strict: "Strict mode",
       strictHint: "No truncation; all 3 challenges must be valid",
@@ -662,6 +676,8 @@ window.__ModuleLoader__.load({
             type: "checkbox",
             checked: props.checked === true,
             disabled: props.disabled === true,
+            // aria-label 让降级路径也能被定位（与 NumberField 的 ariaLabel 同源考虑）
+            "aria-label": props.label,
             onChange: (event) => {
               if (typeof props.onChange === "function") props.onChange(event.target.checked);
             },
@@ -993,6 +1009,28 @@ window.__ModuleLoader__.load({
       const limit = Number.isFinite(max) ? max : 40;
       if (text.length <= limit) return text;
       return text.slice(0, limit) + "…";
+    }
+
+    /** 勾选框回调取值：宿主原语可能传 boolean，也可能传事件 ⇒ 两种都容忍。 */
+    function checkboxChecked(next) {
+      if (typeof next === "boolean") return next;
+      if (next !== null && next !== undefined && typeof next === "object" && next.target !== undefined) return next.target.checked === true;
+      return null;
+    }
+
+    /**
+     * 历史记录的来源（契约 §64.4 A）：`'probe' | 'cli' | 'ui' | null`。
+     * **字段缺失一律按 null 处理**（旧记录）——宁可显示，也不要误判成探针而隐藏。
+     */
+    function originOf(row) {
+      if (row === null || row === undefined) return null;
+      const origin = textOf(row.origin);
+      return origin.length === 0 ? null : origin;
+    }
+
+    /** 该行是否是探针记录（只有显式 `'probe'` 才算）。 */
+    function isProbeRow(row) {
+      return originOf(row) === "probe";
     }
 
     /** 毫秒展示。 */
@@ -1673,6 +1711,13 @@ window.__ModuleLoader__.load({
        * 一律退回本功能上线前的行为，绝不报错。
        */
       const [hostFacts, setHostFacts] = useState({ activeRun: undefined, lastHistoryError: undefined });
+      /**
+       * §64.4 A（**修正后**）：「隐藏探针记录」默认**勾选**。
+       * ⚠️ 客户端过滤，**不**让服务端按 `origin=ui` 过滤 —— 那样会把操作者 4 条 `origin: null`
+       * 的旧记录一起挡掉，历史页直接空白。
+       * 只隐藏显式 `'probe'` 的行；`cli` / `ui` / `null` / **字段缺失**一律显示。
+       */
+      const [hideProbe, setHideProbe] = useState(true);
 
       /**
        * 最近一次从宿主看到的 activeRunId（§28.3）。
@@ -2550,15 +2595,24 @@ window.__ModuleLoader__.load({
         }
         const records = safeList(entry.records);
         const detailStatsError = textOf(entry.statsError);
+        /**
+         * §64.4 A（**修正后：客户端过滤**）：
+         * 只隐藏**显式** `origin === 'probe'` 的行；`cli` / `ui` / `null` / **字段缺失** 一律显示
+         * （来源未知 ≠ 探针 —— 操作者 4 条旧记录都是 null，绝不能因此变空）。
+         * 聚合表**不做**这个过滤（见下方 renderHistory 的说明）。
+         */
+        const visibleRecords = hideProbe ? records.filter((row) => !isProbeRow(row)) : records;
+        const hiddenProbeCount = records.length - visibleRecords.length;
         // §61.4 C：只要有任一行是"未校准"，就在表下给一条可见说明（不只靠悬停 tooltip）
-        const detailHasUncalibrated = records.some((row) => needsCalibrationNote(row.probability, probabilityStatusOf(row)));
+        const detailHasUncalibrated = visibleRecords.some((row) => needsCalibrationNote(row.probability, probabilityStatusOf(row)));
         return jsxs("div", {
           children: [
             // 父任务更正 3：/history 的 stats.error 非空 ⇒ 必须显式提示，不得显示成「暂无明细记录」
             detailStatsError.length > 0
               ? jsx("div", { key: "stats-error", style: S.noticeBad, children: tt("historyLoadFailed", { reason: detailStatsError }) })
               : null,
-            jsx("p", { key: "t", style: S.hint, children: tt("historyDetailTitle", { n: records.length }) }),
+            jsx("p", { key: "t", style: S.hint, children: tt("historyDetailTitle", { n: visibleRecords.length }) }),
+            hiddenProbeCount > 0 ? jsx("p", { key: "hidden", style: S.hint, children: tt("hiddenProbe", { n: hiddenProbeCount }) }) : null,
             detailHasUncalibrated ? jsx("p", { key: "calib", style: { ...S.hint, color: COLOR.warn }, children: tt("calibrationNote") }) : null,
             jsx(DataTable, {
               key: "table",
@@ -2595,6 +2649,18 @@ window.__ModuleLoader__.load({
                     const text = label.length > 0 ? label : "—";
                     const shown = verdict.kind === "insufficient" && top1 === null ? text + " · " + tt("noRank") : text;
                     return jsx("span", { style: { color: color }, children: shown });
+                  },
+                },
+                {
+                  key: "origin",
+                  // §64.4 A3：徽标**常显**（与过滤是两个独立机制）——`cli` 即使不被过滤也要能认出来
+                  title: tt("colOrigin"),
+                  render: (row) => {
+                    const origin = originOf(row);
+                    if (origin === "probe") return jsx("span", { style: S.chipWarn, children: tt("originProbe") });
+                    if (origin === "cli") return jsx("span", { style: S.chip, children: tt("originCli") });
+                    // 'ui' / null / 字段缺失 ⇒ 不显示徽标
+                    return jsx("span", { children: "" });
                   },
                 },
                 {
@@ -2638,7 +2704,8 @@ window.__ModuleLoader__.load({
                   },
                 },
               ],
-              rows: records.map((row, index) => ({ __key: String(index), ...row })),
+              // §64.4 A2：表体只渲染**过滤后**的行（探针行在此处被隐藏）
+              rows: visibleRecords.map((row, index) => ({ __key: String(index), ...row })),
             }),
           ],
         });
@@ -2839,16 +2906,35 @@ window.__ModuleLoader__.load({
                 }),
               ],
             }),
-            jsx("div", {
+            jsxs("div", {
               key: "search",
-              style: { margin: "10px 0 4px", maxWidth: "420px" },
-              children: jsx(Input, {
-                type: "text",
-                value: historyQuery,
-                placeholder: tt("targetsSearch"),
-                "aria-label": tt("targetsSearch"),
-                onChange: (event) => setHistoryQuery(event.target.value),
-              }),
+              style: { margin: "10px 0 4px", display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "center" },
+              children: [
+                jsx("span", {
+                  key: "q",
+                  style: { maxWidth: "420px", flex: "1 1 240px", minWidth: "180px" },
+                  children: jsx(Input, {
+                    type: "text",
+                    value: historyQuery,
+                    placeholder: tt("targetsSearch"),
+                    "aria-label": tt("targetsSearch"),
+                    onChange: (event) => setHistoryQuery(event.target.value),
+                  }),
+                }),
+                // §64.4 A2：客户端过滤开关（默认勾选）。只影响**明细表**，不影响聚合表。
+                jsx("span", {
+                  key: "hide-probe",
+                  style: { display: "inline-flex", alignItems: "center" },
+                  children: jsx(Checkbox, {
+                    checked: hideProbe,
+                    label: tt("hideProbe"),
+                    onChange: (next) => {
+                      const value = checkboxChecked(next);
+                      if (value !== null) setHideProbe(value);
+                    },
+                  }),
+                }),
+              ],
             }),
             historyNotice !== null ? jsx("div", { key: "notice", style: S.notice, children: textOf(historyNotice) }) : null,
             ...body,
@@ -3210,6 +3296,17 @@ window.__ModuleLoader__.load({
                               }),
                               jsx("span", { style: S.hint, children: tt("challengesHint") }),
                               strict ? jsx("span", { style: S.chipWarn, children: tt("strictForced", { n: STRICT_COUNT }) }) : null,
+                              /**
+                               * §64.4 B：`count < 3` 时**只提示、不禁止**（用户有权设小值去验连通性）。
+                               * `strict` 下 count 恒为 3 ⇒ 这里天然不触发。
+                               */
+                              count < STRICT_COUNT
+                                ? jsx("span", {
+                                    key: "count-low",
+                                    style: { flexBasis: "100%", color: COLOR.warn, fontSize: ".92em" },
+                                    children: tt("countLowHint", { n: count }),
+                                  })
+                                : null,
                             ],
                           }),
                         ],

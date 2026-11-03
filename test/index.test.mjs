@@ -20,7 +20,7 @@ process.env.DSH_FINGERPRINT_NO_PREWARM = '1'; // 避免 import 期触发 lmfpd �
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -50,11 +50,14 @@ const {
   HISTORY_LIMIT_DEFAULT,
   HISTORY_LIMIT_MAX,
   HISTORY_RECORD_KEYS,
+  installRoutes,
   INTERRUPTED_ERROR,
   isLoopbackAddress,
   isLoopbackHost,
   isSameProcess,
   noteHistoryError,
+  originOrNull,
+  originOrDefault,
   parseHistoryQuery,
   parseRunOptions,
   persistRunHistory,
@@ -73,12 +76,12 @@ const {
 } = mod;
 
 /** 造一个最小的假请求（authorize 只读 method / headers / socket.remoteAddress）。 */
-function fakeRequest({ method = 'GET', host = '127.0.0.1:2418', origin, referer, secFetchSite, remoteAddress = '127.0.0.1' } = {}) {
+function fakeRequest({ method = 'GET', host = '127.0.0.1:2418', origin, referer, secFetchSite, remoteAddress = '127.0.0.1', url = '/' } = {}) {
   const headers = { host };
   if (origin !== undefined) headers.origin = origin;
   if (referer !== undefined) headers.referer = referer;
   if (secFetchSite !== undefined) headers['sec-fetch-site'] = secFetchSite;
-  return { method, headers, socket: { remoteAddress } };
+  return { method, url, headers, socket: { remoteAddress } };
 }
 
 const allowed = (request) => authorize(request) === true;
@@ -465,7 +468,7 @@ function fakeCapture() {
   };
 }
 
-test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3（18 键，camelCase 直映）', () => {
+test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3（19 键，camelCase 直映）', () => {
   const run = fakeRun({
     results: [
       { provider: 'provider_a', model: 'm-a', aggregate: fakeAggregate() },
@@ -475,7 +478,7 @@ test('H2：buildHistoryRecords —— 2 目标 → 2 条，逐键对齐 §29.3�
   const records = buildHistoryRecords(run);
   assert.equal(records.length, 2);
   assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS, '键集合与顺序都要逐字对齐契约');
-  assert.equal(Object.keys(records[0]).length, 18);
+  assert.equal(Object.keys(records[0]).length, 19);
   assert.equal(records[0].v, 1);
   assert.equal(records[0].ts, '2026-11-02T06:30:00.000Z', 'ts 用 finishedAt 的 ISO');
   assert.equal(records[0].runId, 'r-9');
@@ -685,11 +688,11 @@ function fakeSidecar(descriptor) {
 /** 静默 ctx（logger.warn 不计分）。 */
 const quietCtx = () => ({ logger: { warn() {} } });
 
-test('FIX-A2①：buildInterruptedRecords —— 2 目标 → 2 条，18 键逐字对齐 §55.5 B 的冻结取值（§61 后 +probabilityStatus）', () => {
+test('FIX-A2①：buildInterruptedRecords —— 2 目标 → 2 条，19 键逐字对齐（§55.5 B + §61 probabilityStatus + §64.4 origin）', () => {
   const records = buildInterruptedRecords(deadDescriptor());
   assert.equal(records.length, 2);
   assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS, '键集合与顺序都要逐字对齐');
-  assert.equal(Object.keys(records[0]).length, 18);
+  assert.equal(Object.keys(records[0]).length, 19);
   assert.equal(records[0].v, 1);
   assert.equal(records[0].ts, '2026-11-03T00:40:00.000Z', 'ts 取自 descriptor.startedAt');
   assert.equal(records[0].runId, 'r-dead');
@@ -1119,7 +1122,7 @@ test('OPT-2⑥：buildHistoryRecords 带出 probabilityStatus（合法值 / 缺�
   for (const value of ['reference_calibrated', 'unavailable']) {
     const records = withAggregate(fakeAggregate({ probabilityStatus: value }));
     assert.equal(records[0].probabilityStatus, value, `${value} 必须原样带出`);
-    assert.equal(Object.keys(records[0]).length, 18);
+    assert.equal(Object.keys(records[0]).length, 19);
     assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS);
   }
   // ② 显式 null
@@ -1234,5 +1237,243 @@ test('OPT-2 追加1：/history/models 每行带 lastProbabilityStatus（与 last
   assert.ok(Object.hasOwn(b4.models[0], 'lastProbabilityStatus'), '字段永不省略（兜底路径）');
   assert.equal(b4.models[0].lastProbabilityStatus, null, '该模型最新记录是 null ⇒ 兜底也是 null');
 
+  await clearHistory();
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// OPT-6（契约 §64.4）：origin 贯通 POST /run → 记录 19 键 → 两条历史路由过滤
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一个 run 记录（走 buildHistoryRecords）。origin 传 undefined ⇒ 键缺失。 */
+function runRecordOf(runId, origin, provider = 'provider_a', model = 'm-a', finishedAt = Date.parse('2026-11-03T05:00:00.000Z')) {
+  return {
+    runId,
+    ...(origin === undefined ? {} : { origin }),
+    options: { rounds: 1, count: 1, parallel: 1, strict: false },
+    targets: [{ provider, model }],
+    results: [{ provider, model, aggregate: null }],
+    error: null,
+    finishedAt,
+  };
+}
+
+test('OPT-6①：POST /run 的 origin 贯通 —— 显式 probe 不被记成 ui（顶层 / options 两条路都覆盖）', () => {
+  const parsed = parseRunOptions({ targets: [{ provider: 'provider_a', model: 'm-a' }], origin: 'probe' });
+  assert.equal(parsed.origin, 'probe', 'parseRunOptions 必须保留合法 origin');
+  const top = buildHistoryRecords(runRecordOf('r-p', 'probe'));
+  assert.equal(top[0].origin, 'probe', '探针记录必须记成 probe，不能被写成 ui');
+  assert.equal(Object.keys(top[0]).length, 19);
+  assert.deepEqual(Object.keys(top[0]), HISTORY_RECORD_KEYS);
+  const viaOptions = buildHistoryRecords({
+    runId: 'r-p2',
+    options: { ...parsed },
+    targets: parsed.targets,
+    results: [],
+    error: null,
+    finishedAt: Date.now(),
+  });
+  assert.equal(viaOptions[0].origin, 'probe', 'options.origin 也要能读到');
+});
+
+test('OPT-6②③：缺省 ⇒ ui；非法值 ⇒ ui，且**不报错不拒绝请求**', () => {
+  const bads = [
+    ['缺省', undefined],
+    ['foo', 'foo'],
+    ['数字', 1],
+    ['对象', { origin: 'probe' }],
+    ['空串', ''],
+    ['布尔', true],
+    ['数组', ['probe']],
+    ['null', null],
+    ['大写变体', 'PROBE'],
+  ];
+  for (const [label, value] of bads) {
+    const body = {
+      targets: [{ provider: 'provider_a', model: 'm-a' }],
+      ...(value === undefined ? {} : { origin: value }),
+    };
+    let parsed;
+    assert.doesNotThrow(() => {
+      parsed = parseRunOptions(body);
+    }, `${label} 不得导致请求被拒`);
+    assert.equal(parsed.origin, 'ui', `${label} ⇒ parseRunOptions 归 ui`);
+    assert.equal(buildHistoryRecords(runRecordOf('r-x', value))[0].origin, 'ui', `${label} ⇒ 记录也是 ui`);
+  }
+  for (const good of ['ui', 'cli', 'probe']) {
+    assert.equal(parseRunOptions({ targets: [{ provider: 'a', model: 'b' }], origin: good }).origin, good);
+    assert.equal(buildHistoryRecords(runRecordOf('r-y', good))[0].origin, good);
+  }
+  assert.equal(originOrDefault('probe'), 'probe');
+  assert.equal(originOrDefault('foo'), 'ui', '生产者侧：非法 ⇒ ui');
+  assert.equal(originOrNull('foo'), null, '只读侧：非法 ⇒ null（不发明 ui）');
+});
+
+test('OPT-6④：buildInterruptedRecords 带 origin（有 / 无 / 非法 三种）', () => {
+  const withOrigin = buildInterruptedRecords(deadDescriptor({ origin: 'probe', runId: 'r-i-probe' }));
+  assert.equal(withOrigin[0].origin, 'probe', '侧车里的 origin 必须写进中断记录');
+  assert.equal(Object.keys(withOrigin[0]).length, 19);
+  assert.deepEqual(Object.keys(withOrigin[0]), HISTORY_RECORD_KEYS);
+
+  const without = buildInterruptedRecords(deadDescriptor({ runId: 'r-i-legacy' }));
+  assert.equal(without[0].origin, null, '旧侧车没有该字段 ⇒ null（**绝不**伪装成 ui）');
+
+  const illegal = buildInterruptedRecords(deadDescriptor({ origin: 'foo', runId: 'r-i-bad' }));
+  assert.equal(illegal[0].origin, null, '侧车里的非法值 ⇒ null');
+});
+
+test('OPT-6⑦⑧：/history 的 ?origin= 过滤 —— 缺省 all（含 null 旧记录）、非法 ⇒ all 且如实反映', async () => {
+  await clearHistory();
+  await appendRecords([
+    ...buildHistoryRecords(runRecordOf('r-ui', 'ui', 'provider_a', 'm-a', Date.parse('2026-11-03T05:00:00.000Z'))),
+    ...buildHistoryRecords(runRecordOf('r-probe', 'probe', 'provider_b', 'm-b', Date.parse('2026-11-03T05:01:00.000Z'))),
+    ...buildHistoryRecords(runRecordOf('r-cli', 'cli', 'provider_c', 'm-c', Date.parse('2026-11-03T05:02:00.000Z'))),
+  ]);
+  const raw = await readFile(HISTORY_GOOD, 'utf8');
+  const legacy = {
+    v: 1, ts: '2026-11-03T05:03:00.000Z', runId: 'r-legacy', provider: 'provider_d', model: 'm-d',
+    decision: 'unscorable', prediction: null, predictionName: null, family: null, familyName: null,
+    probability: null, agreement: null, stability: 'inconclusive', validRounds: 0, totalRounds: 1,
+    options: { rounds: 1, count: 1, parallel: 1, strict: false }, error: null, probabilityStatus: null,
+  };
+  await writeFile(HISTORY_GOOD, `${raw}${JSON.stringify(legacy)}\n`, 'utf8');
+
+  const call = async (qs) => {
+    const capture = fakeCapture();
+    await routeHistory(new URLSearchParams(qs), capture.response);
+    return JSON.parse(capture.body());
+  };
+
+  const all = await call('');
+  assert.equal(all.origin, 'all', '缺省必须是 all');
+  assert.equal(all.records.length, 4, '缺省回**全部**（含 origin=null 的旧记录）');
+  assert.ok(all.records.some((r) => r.origin === null), '旧记录（null）也必须在缺省视图里');
+  assert.equal(Object.hasOwn(all, 'originRequested'), false, '没被归一过就不多这个字段');
+
+  assert.equal((await call('origin=all')).records.length, 4);
+
+  const ui = await call('origin=ui');
+  assert.equal(ui.origin, 'ui');
+  assert.equal(ui.records.length, 1);
+  assert.equal(ui.records[0].runId, 'r-ui');
+
+  const probe = await call('origin=probe');
+  assert.equal(probe.origin, 'probe');
+  assert.equal(probe.records.length, 1);
+  assert.equal(probe.records[0].runId, 'r-probe');
+
+  assert.equal((await call('origin=cli')).records.length, 1);
+
+  const bad = await call('origin=foo');
+  assert.equal(bad.origin, 'all', '非法 origin 按 all 处理（不 400）');
+  assert.equal(bad.records.length, 4, '非法值不得把记录过滤掉');
+  assert.equal(bad.originRequested, 'foo', '必须如实反映请求值（客户端才能解释）');
+
+  assert.equal((await call('origin=ui&limit=1')).records.length, 1, '先过滤后截断');
+  assert.equal((await call('origin=probe&provider=provider_b')).records.length, 1, '与 provider 过滤可叠加');
+  assert.equal((await call('origin=probe&provider=provider_a')).records.length, 0);
+  await clearHistory();
+});
+
+test('OPT-6⑨：/history/models 的 ?origin= 过滤 —— 显式过滤时行只在过滤集上聚合', async () => {
+  await clearHistory();
+  await appendRecords([
+    ...buildHistoryRecords(runRecordOf('r-a-ui', 'ui', 'provider_a', 'm-a', Date.parse('2026-11-03T06:00:00.000Z'))),
+    ...buildHistoryRecords(runRecordOf('r-a-probe', 'probe', 'provider_a', 'm-a', Date.parse('2026-11-03T06:01:00.000Z'))),
+    ...buildHistoryRecords(runRecordOf('r-a-ui2', 'ui', 'provider_a', 'm-a', Date.parse('2026-11-03T06:02:00.000Z'))),
+    ...buildHistoryRecords(runRecordOf('r-b-probe', 'probe', 'provider_b', 'm-b', Date.parse('2026-11-03T06:03:00.000Z'))),
+  ]);
+  // aggregator 传 undefined ⇒ 用真实 aggregateByModel（缺省路径行为不变）
+  const call = async (qs) => {
+    const capture = fakeCapture();
+    await routeHistoryModels(capture.response, readHistory, undefined, new URLSearchParams(qs));
+    return JSON.parse(capture.body());
+  };
+
+  const all = await call('');
+  assert.equal(all.origin, 'all');
+  assert.equal(all.models.length, 2);
+  assert.equal(all.models.find((r) => r.model === 'm-a').runs, 3, '缺省 = 全部记录（含探针，保持既有计数语义）');
+
+  const ui = await call('origin=ui');
+  assert.equal(ui.origin, 'ui');
+  assert.equal(ui.models.length, 1, '没有 ui 记录的模型不得出现');
+  assert.equal(ui.models[0].model, 'm-a');
+  assert.equal(ui.models[0].runs, 2, 'runs 只数 ui 记录');
+  assert.equal(Object.hasOwn(ui.models[0], 'lastError'), true);
+  assert.equal(Object.hasOwn(ui.models[0], 'lastProbabilityStatus'), true);
+
+  const probe = await call('origin=probe');
+  assert.equal(probe.models.length, 2);
+  assert.equal(probe.models.find((r) => r.model === 'm-a').runs, 1);
+
+  const bad = await call('origin=foo');
+  assert.equal(bad.origin, 'all');
+  assert.equal(bad.models.length, 2);
+  assert.equal(bad.originRequested, 'foo');
+  await clearHistory();
+});
+
+test('OPT-6⑩（端到端分派）：经 installRoutes 的 HTTP 分派，?origin= 必须真的生效', async () => {
+  // ⚠️ 这条是为一个**真实 bug** 立的回归网：分派若忘了把 searchParams 传给 routeHistoryModels，
+  // 函数级单测全绿、HTTP 上过滤却完全不生效（"看起来接好了、实际不工作"）。
+  await clearHistory();
+  await appendRecords([
+    ...buildHistoryRecords(runRecordOf('r-ui', 'ui', 'provider_a', 'm-a', Date.parse('2026-11-03T07:00:00.000Z'))),
+    ...buildHistoryRecords(runRecordOf('r-probe', 'probe', 'provider_b', 'm-b', Date.parse('2026-11-03T07:01:00.000Z'))),
+  ]);
+
+  let registered = null;
+  const fakeServer = {
+    register(entry) {
+      registered = entry;
+      return () => {};
+    },
+  };
+  installRoutes({ logger: { warn() {} } }, fakeServer);
+  assert.equal(registered?.kind, 'prefix');
+  assert.equal(registered?.path, '/fingerprint');
+
+  /** 发一次"假 HTTP"请求并等响应体。 */
+  const httpGet = async (path) => {
+    const state = { status: null, body: '' };
+    const done = new Promise((resolve) => {
+      const response = {
+        writeHead(status) {
+          state.status = status;
+        },
+        end(payload) {
+          state.body = payload ?? '';
+          resolve();
+        },
+      };
+      registered.handler(fakeRequest({ url: path }), response);
+    });
+    await done;
+    return { status: state.status, json: JSON.parse(state.body) };
+  };
+
+  const all = await httpGet('/fingerprint/history/models');
+  assert.equal(all.status, 200);
+  assert.equal(all.json.origin, 'all', 'HTTP 缺省 = all');
+  assert.equal(all.json.models.length, 2, 'HTTP 缺省必须回全部模型（否则就是"记录突然少了"）');
+
+  const ui = await httpGet('/fingerprint/history/models?origin=ui');
+  assert.equal(ui.json.origin, 'ui');
+  assert.equal(ui.json.models.length, 1, 'HTTP 上 ?origin=ui 必须真的过滤');
+  assert.equal(ui.json.models[0].model, 'm-a');
+
+  const history = await httpGet('/fingerprint/history?origin=probe');
+  assert.equal(history.json.origin, 'probe');
+  assert.equal(history.json.records.length, 1);
+  assert.equal(history.json.records[0].runId, 'r-probe');
+
+  const historyDefault = await httpGet('/fingerprint/history');
+  assert.equal(historyDefault.json.origin, 'all');
+  assert.equal(historyDefault.json.records.length, 2, 'HTTP 上 /history 缺省也必须回全部');
+
+  const historyBad = await httpGet('/fingerprint/history/models?origin=foo');
+  assert.equal(historyBad.json.origin, 'all');
+  assert.equal(historyBad.json.originRequested, 'foo');
+  assert.equal(historyBad.status, 200, '非法值不得 400');
   await clearHistory();
 });

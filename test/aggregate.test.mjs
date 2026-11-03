@@ -547,3 +547,87 @@ test('23) §61 部分轮带该字段、部分轮完全没有 ⇒ unavailable（�
     '只要**任一**轮带该字段就算「不可用」；不要求全部轮都带',
   )
 })
+
+// ══ §61 边界：无有效回合必须是 null（绝不可与 'unavailable' 合并）════════════
+
+/**
+ * 构造真机 `count=1` 那种「**回合级 partial**」的回合：
+ * SDK 明确给了 `probability_status`，但 `decision !== 'scored'` ⇒ 该回合**无效**。
+ */
+function partialRound(overrides = {}) {
+  return {
+    analysis: makeAnalysis({
+      prediction: 'A',
+      results: pairBoard('A', 'B'),
+      probability: null,
+      decision: 'partial',
+      probabilityStatus: 'unavailable',
+      ...overrides,
+    }),
+    error: null,
+  }
+}
+
+test('24) §61 核心回归网：回合级 decision=partial（SDK 带 unavailable）⇒ probabilityStatus 必须为 null', () => {
+  // 真机 count=1 的现场：SDK 返回 decision='partial' 且 probability_status='unavailable'
+  const agg = aggregateRounds([partialRound()])
+
+  assert.equal(agg.totalRounds, 1)
+  assert.equal(agg.validRounds, 0, 'decision !== "scored" ⇒ 不是有效回合')
+  assert.equal(agg.decision, 'unscorable')
+  assert.equal(agg.confidence, null)
+  assert.equal(
+    agg.probabilityStatus,
+    null,
+    '无有效回合 ⇒ null（归因「样本不足」）。不可改成 "unavailable" —— 那会把「样本不足」误报成「未校准」，违反 §61.2',
+  )
+  // 反向断言：这条边界**不是**因为「SDK 没给字段」才成立的
+  assert.equal(partialRound().analysis.probability_status, 'unavailable', '夹具确实带着该字段')
+})
+
+test('25) §61 partial 回合 + 一个真正 scored 回合 ⇒ unavailable（有有效回合时才采纳）', () => {
+  const agg = aggregateRounds([
+    partialRound(),
+    scoredRound('A', pairBoard('A', 'B'), { probability: null, probabilityStatus: 'unavailable' }),
+  ])
+
+  assert.equal(agg.totalRounds, 2)
+  assert.equal(agg.validRounds, 1, '只有那个 scored 回合有效')
+  assert.equal(agg.decision, 'partial')
+  assert.equal(agg.probabilityStatus, 'unavailable', '存在有效回合且它带 unavailable ⇒ 采纳')
+})
+
+test('26) §61 全 partial 且 SDK 说 calibrated ⇒ 仍为 null（与 SDK 说什么无关）', () => {
+  const agg = aggregateRounds([
+    partialRound({ probabilityStatus: 'reference_calibrated', probability: 0.9 }),
+  ])
+
+  assert.equal(agg.validRounds, 0)
+  assert.equal(
+    agg.probabilityStatus,
+    null,
+    '判定只看有效回合 ⇒ 无效回合即使说 "reference_calibrated" 也不算',
+  )
+})
+
+test('27) §61 对照实验：同一份 analysis，只把 decision 从 partial 改成 scored 就会被采纳', () => {
+  const base = {
+    prediction: 'A',
+    results: pairBoard('A', 'B'),
+    probability: null,
+    probabilityStatus: 'unavailable',
+  }
+
+  const asPartial = aggregateRounds([
+    { analysis: makeAnalysis({ ...base, decision: 'partial' }), error: null },
+  ])
+  const asScored = aggregateRounds([{ analysis: makeAnalysis({ ...base, decision: 'scored' }), error: null }])
+
+  assert.equal(asPartial.validRounds, 0)
+  assert.equal(asPartial.probabilityStatus, null, 'partial ⇒ null')
+
+  assert.equal(asScored.validRounds, 1)
+  assert.equal(asScored.probabilityStatus, 'unavailable', 'scored ⇒ 采纳')
+
+  // ⇒ 差异**只**来自 decision ⇒ 证明这条边界是「回合有效性」造成的，与字段有无 / 取值无关
+})

@@ -50,6 +50,10 @@ const SCENARIOS = [
   'probabilityStates',
   'historyColumns',
   'detectVerdictColumns',
+  'originFilter',
+  'countLowHint',
+  'countHintTwo',
+  'countHintMissing',
   'hostActiveRunDead',
   'hostActiveRunAlive',
   'regress',
@@ -77,7 +81,7 @@ const ASSERTION_FLOOR = {
   busyWithRunId: 18,
   busyFallbackStatus: 18,
   busyHopeless: 16,
-  parallelDefault: 15,
+  parallelDefault: 16,
   inflightCap: 14,
   sseError: 17,
   detailToggle: 17,
@@ -95,6 +99,10 @@ const ASSERTION_FLOOR = {
   probabilityStates: 24,
   historyColumns: 24,
   detectVerdictColumns: 26,
+  originFilter: 34,
+  countLowHint: 20,
+  countHintTwo: 20,
+  countHintMissing: 16,
   hostActiveRunDead: 19,
   hostActiveRunAlive: 19,
   regress: 16,
@@ -495,6 +503,26 @@ async function runScenario(scenario, mode, src) {
     return undefined;
   }
 
+  /** 找「隐藏探针记录」勾选框：原语在位用 props.onChange（boolean）；降级路径用宿主 input 的 onChange（事件）。 */
+  function setHideProbe(out, value) {
+    const viaPrimitive = out.primitives.find((p) => p.name === 'Checkbox' && String(p.props.label) === '隐藏探针记录');
+    if (viaPrimitive !== undefined) {
+      viaPrimitive.props.onChange(value);
+      return true;
+    }
+    const viaHost = out.hosts.find((h) => h.type === 'input' && h.props.type === 'checkbox' && h.props['aria-label'] === '隐藏探针记录');
+    if (viaHost !== undefined) {
+      viaHost.props.onChange({ target: { checked: value } });
+      return true;
+    }
+    return false;
+  }
+
+  /** 统计某种**徽标**（span 的唯一子节点恰好是该文案）。用于精确计数，避免把提示语里的同名字串算进去。 */
+  function badgeCount(out, label) {
+    return out.hosts.filter((h) => h.type === 'span' && String(h.props.children) === label).length;
+  }
+
   /** 切换到某个视图：原语 SegmentedTabs 走 onChange；降级实现点按钮。 */
   function switchTab(out, label) {
     const tabs = out.primitives.find((p) => p.name === 'SegmentedTabs');
@@ -629,6 +657,36 @@ async function runScenario(scenario, mode, src) {
   const colInsufficientRow = { provider: 'provider_b', model: 'example/second', lastTs: '2026-11-03T00:58:00.000Z', runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive' };
   const colInterruptedRow = { provider: 'provider_a', model: 'acme/text-large', lastTs: '2026-11-03T00:55:00.000Z', runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive', lastError: INTERRUPTED_LONG_ERROR };
 
+  // ── OPT-8 夹具：origin 客户端过滤 / 来源徽标（§64.4 A）──────────────────────
+  /** 用 `predictionName` 当**行标记**（top1 列会原样渲染），便于精确计数"这行在不在"。 */
+  const originRecord = (origin, mark) =>
+    Object.assign(
+      {
+        v: 1,
+        ts: '2026-11-03T02:00:00.000Z',
+        runId: 'r-' + mark,
+        provider: 'provider_a',
+        model: 'acme/text-large',
+        decision: 'scored',
+        prediction: mark,
+        predictionName: mark,
+        family: null,
+        familyName: null,
+        probability: 0.9,
+        probabilityStatus: 'reference_calibrated',
+        agreement: 1,
+        stability: 'stable',
+        validRounds: 3,
+        totalRounds: 3,
+        error: null,
+      },
+      // 'missing' ⇒ **整条不带 origin 字段**（旧记录）：必须与 null 一样照常显示
+      origin === 'missing' ? {} : { origin: origin },
+    );
+  const originRecords = [originRecord('ui', 'MARK-UI'), originRecord('probe', 'MARK-PROBE'), originRecord('cli', 'MARK-CLI'), originRecord(null, 'MARK-NULL'), originRecord('missing', 'MARK-NOFLD')];
+  const originAggRow = { provider: 'provider_a', model: 'acme/text-large', lastTs: '2026-11-03T02:00:00.000Z', runs: 5, lastDecision: 'scored', lastPrediction: 'MARK-UI', lastPredictionName: 'MARK-UI', lastProbability: 0.9, lastStability: 'stable' };
+  const originProbeMark = 'MARK-PROBE';
+
   // ── OPT-3 件 A 夹具：检测页结果表（结论/原因 与历史页同一判定）────────────────
   // row.error 来自**运行结果本身**（tasks[].error → errorByTarget），不是臆造字段
   const detectAgg = (over) => Object.assign({ decision: 'unscorable', prediction: null, predictionName: null, family: null, familyName: null, validRounds: 0, totalRounds: 3, agreement: null, confidence: null, stability: 'inconclusive', ranking: [], perRound: [] }, over);
@@ -761,6 +819,13 @@ async function runScenario(scenario, mode, src) {
     // §61.4 D：结论 / 原因 两列各自装对东西
     historyColumns: { status: statusNull, runs: {}, history: { models: [colStableRow, colInsufficientRow, colInterruptedRow], stats: { count: 3, path: 'x', oldest: 'a', newest: 'b', skippedLines: 0, error: null }, records: [], removed: 0 } },
     detectVerdictColumns: { status: statusNull, runs: { 'r-1': detectSnapshot }, seedKeys: { runId: 'r-1' }, detectSnapshot: true },
+    // §64.4 A：默认勾选「隐藏探针记录」；聚合表**不**过滤（聚合行跨记录汇总，前端不编造计数）
+    originFilter: { status: statusNull, runs: {}, history: { models: [originAggRow], stats: { count: 5, path: 'x', oldest: 'a', newest: 'b', skippedLines: 0, error: null }, records: originRecords, removed: 0 } },
+    // §64.4 B：count < 3 只提示不禁止
+    countLowHint: { status: statusNull, runs: {}, advanced: true, seedKeys: { selected: MODEL_KEY }, countText: '1' },
+    countHintTwo: { status: statusNull, runs: {}, advanced: true, seedKeys: { selected: MODEL_KEY }, countText: '2' },
+    // count 字段异常/缺失 ⇒ 退回默认 3 ⇒ 不显示提示、不报错
+    countHintMissing: { status: statusNull, runs: {}, advanced: true, seedKeys: { selected: MODEL_KEY }, countText: '' },
     hostActiveRunAlive: { status: hostStatusAlive, runs: { 'r-live': Object.assign({}, runningSnapshot, { runId: 'r-live' }) } },
     regress: { status: statusNull, runs: {}, regression: true },
   };
@@ -812,6 +877,7 @@ async function runScenario(scenario, mode, src) {
   if (spec.advanced) seed[11] = true; // advancedOpen
   if (spec.seedKeys !== undefined && spec.seedKeys.selected !== undefined) seed[3] = { [MODEL_KEY]: true }; // selected
   if (spec.roundsText !== undefined) seed[6] = spec.roundsText; // roundsText
+  if (spec.countText !== undefined) seed[7] = spec.countText; // countText（§64.4 B）
   if (spec.filterQuery !== undefined) seed[20] = spec.filterQuery; // historyQuery（客户端筛选）
   if (spec.seedKeys !== undefined && spec.seedKeys.runId !== undefined && spec.seedKeys.runId !== null) seed[12] = spec.seedKeys.runId; // runId
   if (spec.dormantOpen) seed[5] = { __dormant__: true }; // openGroups
@@ -939,6 +1005,8 @@ async function runScenario(scenario, mode, src) {
     const value = viaPrimitive !== undefined ? viaPrimitive.props.value : viaHost !== undefined ? viaHost.props.value : undefined;
     check('6) 高级面板默认并发数 = 3', value === '3', String(value));
     check('6) 并发释义已改为「同时在跑的轮次数（跨 目标 × 轮次）」', text.includes('同时在跑的轮次数') && text.includes('跨目标') === false);
+    // §64.4 B：默认 count=3 ⇒ 不显示 count<3 提示（= 4 走同一条判断，不另设场景）
+    check('6) count=3（默认）⇒ 不显示 count<3 提示', text.includes('SDK 需要恰好 3 条有效回答') === false);
   }
   if (scenario === 'inflightCap') {
     check('7) 在飞请求数精确封顶 = min(并发3, 目标×轮次1) × 每轮3 = 3', text.includes('min(并发 3, 目标×轮次 1) × 每轮挑战 3 = 3'), text.split('\n').filter((l) => l.indexOf('在飞') >= 0).join('|'));
@@ -1207,6 +1275,72 @@ async function runScenario(scenario, mode, src) {
     check('21) 但完整 error 仍在「失败原因」列（没有被连带删掉）', text.includes(INTERRUPTED_LONG_ERROR));
     check('21) 数字置信度不受影响（91.0%）', text.includes('91.0%'));
     check('21) 未白屏、未落 PageBoundary', text.includes('本页面渲染出错') === false && mounted.out.elements > 50);
+  }
+  if (scenario === 'originFilter') {
+    // ── M1/M2：默认勾选「隐藏探针记录」──────────────────────────────────
+    switchTab(mounted.out, HISTORY_TAB_LABEL);
+    const after = await flush(panelComp);
+    const t2 = after.out.texts.join('\n');
+    const detailButton = findButton(after.out, '展开明细');
+    check('22) 找到「展开明细」按钮', detailButton !== undefined);
+    if (detailButton !== undefined) {
+      detailButton.onClick();
+      const open = await flush(panelComp);
+      const t3 = open.out.texts.join('\n');
+      check('22) 明细表新增「来源」列', t3.includes('来源'));
+      // 精确行数：5 条记录里隐藏 1 条探针
+      check('22) 默认（勾选）隐藏探针：标题显示「最近 4 条」', t3.includes('最近 4 条'), t3.split('\n').filter((l) => l.indexOf('最近') >= 0).join('|'));
+      check('22) 探针行被隐藏（MARK-PROBE 不出现）', t3.includes(originProbeMark) === false);
+      check('22) ui 行显示（MARK-UI）', t3.includes('MARK-UI'));
+      check('22) cli 行显示（MARK-CLI）', t3.includes('MARK-CLI'));
+      // ⚠️ 最关键两条：防「历史变空」
+      check('22) **origin: null 的旧记录必须显示**（MARK-NULL）', t3.includes('MARK-NULL'));
+      check('22) **origin 字段缺失的记录必须显示**（MARK-NOFLD）', t3.includes('MARK-NOFLD'));
+      check('22) 提示「已隐藏 1 条探针记录」', t3.includes('已隐藏 1 条探针记录'));
+      // M2 徽标：默认下 probe 行不可见 ⇒ 探针徽标 0；cli 徽标 1
+      check('22) 徽标精确计数：探针徽标 0 个', badgeCount(open.out, '探针') === 0, String(badgeCount(open.out, '探针')));
+      check('22) 徽标精确计数：CLI 徽标 1 个（cli 不被过滤，徽标常显）', badgeCount(open.out, 'CLI') === 1, String(badgeCount(open.out, 'CLI')));
+      check('22) 聚合表**不**做客户端过滤（聚合行仍在）', t3.includes('acme/text-large'));
+      check('22) 未白屏、未落 PageBoundary', t3.includes('本页面渲染出错') === false && open.out.elements > 50);
+
+      // ── 取消勾选 ⇒ 显示全部 ──────────────────────────────────────────
+      const toggled = setHideProbe(open.out, false);
+      check('22) 找到「隐藏探针记录」勾选框并取消勾选', toggled);
+      const all = await flush(panelComp);
+      const t4 = all.out.texts.join('\n');
+      check('22) 取消勾选后总行数 = 全部（「最近 5 条」）', t4.includes('最近 5 条'), t4.split('\n').filter((l) => l.indexOf('最近') >= 0).join('|'));
+      check('22) 取消勾选后探针行出现（MARK-PROBE）', t4.includes(originProbeMark));
+      check('22) 取消勾选后 5 个标记全在（= 总行数全部）', ['MARK-UI', originProbeMark, 'MARK-CLI', 'MARK-NULL', 'MARK-NOFLD'].every((m) => t4.includes(m)));
+      // 徽标总数 == probe 行数 + cli 行数 == 2（恰等于，不多不少）
+      const probeBadges = badgeCount(all.out, '探针');
+      const cliBadges = badgeCount(all.out, 'CLI');
+      check('22) 徽标总数恰 = probe 行数 + cli 行数 = 2', probeBadges + cliBadges === 2, '探针=' + String(probeBadges) + ' CLI=' + String(cliBadges));
+      check('22) 探针徽标 1 个（只给 probe 行）', probeBadges === 1, String(probeBadges));
+      check('22) ui / null / 缺失行都没有徽标（徽标总数不含它们）', probeBadges + cliBadges === 2);
+      check('22) 取消勾选后「已隐藏」提示消失', t4.includes('已隐藏') === false);
+    }
+  }
+  if (scenario === 'countLowHint' || scenario === 'countHintTwo' || scenario === 'countHintMissing') {
+    // ── M3：count < 3 的提示（§64.4 B）──────────────────────────────────
+    const n = scenario === 'countLowHint' ? '1' : scenario === 'countHintTwo' ? '2' : null;
+    const label = scenario === 'countLowHint' ? '22' : '23';
+    if (n === null) {
+      // count 字段异常/缺失 ⇒ 退回默认 3 ⇒ 不显示提示、不报错
+      check(label + ') count 字段缺失/异常 ⇒ 不显示 count<3 提示', text.includes('SDK 需要恰好 3 条有效回答') === false);
+      check(label + ') 退回默认 count=3（预计行仍写「每轮挑战 3」）', text.includes('每轮挑战 3'));
+      check(label + ') 不报错、未落 PageBoundary', text.includes('本页面渲染出错') === false && mounted.out.elements > 50);
+    } else {
+      check(label + ') count=' + n + ' ⇒ 出现提示（含 SDK 需要恰好 3 条有效回答）', text.includes('SDK 需要恰好 3 条有效回答'));
+      check(label + ') 提示里带实际值 N=' + n, text.includes('当前设为 ' + n + ' 时'), text.split('\n').filter((l) => l.indexOf('当前设为') >= 0).join('|'));
+      check(label + ') 提示含「样本不足」措辞', text.includes('只会得到') && text.includes('样本不足'));
+      // 「不禁止」：count 照原值生效，且「开始检测」仍可点
+      check(label + ') count=' + n + ' 未被强制夹到 3（预计行写「每轮挑战 ' + n + '」）', text.includes('每轮挑战 ' + n), text.split('\n').filter((l) => l.indexOf('每轮挑战') >= 0).join('|'));
+      const startButton = findButton(mounted.out, START_LABEL);
+      check(label + ') 「开始检测」按钮存在且未被禁用（只提示不禁止）', startButton !== undefined && startButton.disabled !== true);
+      const countField = mounted.out.primitives.find((p) => p.name === 'Input' && p.props['aria-label'] === '每轮挑战数') !== undefined || mounted.out.hosts.some((h) => h.type === 'input' && h.props['aria-label'] === '每轮挑战数');
+      check(label + ') 挑战数控件仍在（没有被提示顶掉）', countField);
+      check(label + ') 未落 PageBoundary', text.includes('本页面渲染出错') === false);
+    }
   }
   if (scenario === 'hostActiveRunDead') {
     check('17) 出现「检测到上次有一个任务未完成」横幅', text.includes('检测到上次有一个任务未完成（宿主重启前启动，无结果）'));
