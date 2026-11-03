@@ -40,25 +40,36 @@ const {
   MAX_PARALLEL,
   authorize,
   buildHistoryRecords,
+  buildInterruptedRecords,
   buildRunItems,
   buildTasks,
+  clearRunSidecar,
+  currentProcessStartedAt,
   failure,
+  historyState,
   HISTORY_LIMIT_DEFAULT,
   HISTORY_LIMIT_MAX,
   HISTORY_RECORD_KEYS,
+  INTERRUPTED_ERROR,
   isLoopbackAddress,
   isLoopbackHost,
+  isSameProcess,
+  noteHistoryError,
   parseHistoryQuery,
   parseRunOptions,
   persistRunHistory,
+  PROCESS_STARTED_AT_TOLERANCE_MS,
   readJsonBody,
+  recoverInterruptedRuns,
   routeHistory,
   routeHistoryClear,
   routeHistoryModels,
   routeStatus,
   runPool,
+  sidecarApi,
   sleep,
   validateRunOptions,
+  writeRunSidecar,
 } = mod;
 
 /** 造一个最小的假请求（authorize 只读 method / headers / socket.remoteAddress）。 */
@@ -375,7 +386,7 @@ test('P2：failure 可附带结构化 runId，且 code/message 不被 extra 覆�
   assert.deepEqual(failure('INVALID_OPTIONS', 'y'), { ok: false, error: { code: 'INVALID_OPTIONS', message: 'y' } });
 });
 
-test('P2：GET /status 暴露 activeRunId —— 客户端据此恢复被 BUSY 挡住的运行', () => {
+test('P2：GET /status 暴露 activeRunId —— 客户端据此恢复被 BUSY 挡住的运行', async () => {
   /** 极小假响应：捕获 writeHead / end 的内容。 */
   const captured = { status: null, body: '' };
   const response = {
@@ -386,7 +397,7 @@ test('P2：GET /status 暴露 activeRunId —— 客户端据此恢复被 BUSY �
       captured.body = payload;
     },
   };
-  routeStatus(response);
+  await routeStatus(response); // FIX-A2：routeStatus 现在是 async（要读侧车）
   const body = JSON.parse(captured.body);
   assert.equal(captured.status, 200);
   assert.equal(body.ok, true);
@@ -400,7 +411,7 @@ test('P2：GET /status 暴露 activeRunId —— 客户端据此恢复被 BUSY �
 // H2（契约 §29 / §31.2）：检测历史
 // ══════════════════════════════════════════════════════════════════════════
 
-const { appendRecords } = await import('../lib/history.js');
+const { appendRecords, clearHistory, readHistory } = await import('../lib/history.js');
 
 /** 造一个 run（默认 2 目标、3 轮）。 */
 function fakeRun(overrides = {}) {
@@ -627,4 +638,464 @@ test('H2：parseHistoryQuery —— limit 钳到 1–200（非法走默认），
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=provider_a&model=m-a')), { limit: 50, provider: 'provider_a', model: 'm-a' });
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=&model=')), { limit: 50 }, '空串视为不过滤');
   assert.deepEqual(parseHistoryQuery(new URLSearchParams('provider=provider_a')), { limit: 50, provider: 'provider_a' });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// FIX-A2（契约 §55）：运行中侧车 → 中断恢复 → 写历史失败可见
+// ══════════════════════════════════════════════════════════════════════════
+
+/** 造一个"上一个进程留下的"侧车 descriptor（远古 processStartedAt + 陌生 pid）。 */
+function deadDescriptor(overrides = {}) {
+  return {
+    v: 1,
+    runId: 'r-dead',
+    startedAt: '2026-11-03T00:40:00.000Z',
+    pid: 999999,
+    processStartedAt: 1,
+    options: { rounds: 2, count: 3, parallel: 2, strict: false },
+    targets: [
+      { provider: 'provider_a', model: 'm-a' },
+      { provider: 'provider_b', model: 'm-b' },
+    ],
+    ...overrides,
+  };
+}
+
+/** 可注入的侧车实现 + 调用计数（W5 未落盘时也能离线验逻辑）。 */
+function fakeSidecar(descriptor) {
+  const state = { reads: 0, clears: 0, cleared: false };
+  return {
+    state,
+    api: {
+      write: null,
+      read: async () => {
+        state.reads += 1;
+        return descriptor;
+      },
+      clear: async () => {
+        state.clears += 1;
+        state.cleared = true;
+        return { ok: true, removed: true, error: null };
+      },
+    },
+  };
+}
+
+/** 静默 ctx（logger.warn 不计分）。 */
+const quietCtx = () => ({ logger: { warn() {} } });
+
+test('FIX-A2①：buildInterruptedRecords —— 2 目标 → 2 条，17 键逐字对齐 §55.5 B 的冻结取值', () => {
+  const records = buildInterruptedRecords(deadDescriptor());
+  assert.equal(records.length, 2);
+  assert.deepEqual(Object.keys(records[0]), HISTORY_RECORD_KEYS, '键集合与顺序都要逐字对齐');
+  assert.equal(Object.keys(records[0]).length, 17);
+  assert.equal(records[0].v, 1);
+  assert.equal(records[0].ts, '2026-11-03T00:40:00.000Z', 'ts 取自 descriptor.startedAt');
+  assert.equal(records[0].runId, 'r-dead');
+  assert.equal(records[0].provider, 'provider_a');
+  assert.equal(records[0].model, 'm-a');
+  assert.equal(records[0].decision, 'unscorable');
+  assert.equal(records[0].validRounds, 0);
+  assert.equal(records[0].totalRounds, 2, 'totalRounds 取自 options.rounds');
+  assert.equal(records[0].stability, 'inconclusive');
+  assert.equal(records[0].prediction, null);
+  assert.equal(records[0].predictionName, null);
+  assert.equal(records[0].family, null);
+  assert.equal(records[0].familyName, null);
+  assert.equal(records[0].probability, null);
+  assert.equal(records[0].agreement, null);
+  assert.equal(records[0].error, INTERRUPTED_ERROR);
+  assert.match(records[0].error, /^interrupted: /, 'error 必须非空且带 interrupted: 前缀');
+  assert.deepEqual(Object.keys(records[0].options).sort(), ['count', 'parallel', 'rounds', 'strict']);
+  assert.equal(records[1].provider, 'provider_b');
+  assert.equal(records[1].model, 'm-b');
+  // 任意 provider/model 名都要能写（不做生态校验）
+  const exotic = buildInterruptedRecords(deadDescriptor({ targets: [{ provider: '完全不在生态里的名字', model: '也不在' }] }));
+  assert.equal(exotic.length, 1);
+  assert.equal(exotic[0].provider, '完全不在生态里的名字');
+  // reason 可覆盖
+  assert.equal(buildInterruptedRecords(deadDescriptor(), 'interrupted: 自定义')[0].error, 'interrupted: 自定义');
+  // 脏输入不抛
+  for (const dirty of [null, undefined, {}, { targets: null }, { targets: [null, 42] }, { options: null }]) {
+    assert.doesNotThrow(() => buildInterruptedRecords(dirty), `buildInterruptedRecords(${JSON.stringify(dirty)}) 不得抛`);
+  }
+  assert.deepEqual(buildInterruptedRecords({ targets: [{ provider: '', model: 'm' }] }), [], '缺 provider 的 target 被跳过');
+});
+
+test('FIX-A2②：恢复幂等 —— 已有同 runId 的记录 ⇒ skipped 计数正确且不产生重复', async () => {
+  await clearHistory();
+  await appendRecords(buildHistoryRecords(fakeRun({ runId: 'r-dead' }))); // 先落 2 条同 runId 的记录
+  assert.equal((await readHistory({})).length, 2);
+
+  const { api, state } = fakeSidecar(deadDescriptor());
+  const result = await recoverInterruptedRuns(quietCtx(), api);
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, 2, '2 个 target 全因 runId 已存在而跳过');
+  assert.equal(result.appended, 0, '绝不能重复写');
+  const all = await readHistory({});
+  assert.equal(all.length, 2, '记录数不变（无重复）');
+  assert.equal(all.filter((record) => record.runId === 'r-dead').length, 2);
+  assert.equal(state.clears, 1, '即使全部跳过，也要清侧车');
+});
+
+test('FIX-A2③：processStartedAt 相同（同进程重组合）⇒ 不恢复，且侧车不得被删除', async () => {
+  await clearHistory();
+  const live = deadDescriptor({ pid: process.pid, processStartedAt: currentProcessStartedAt() });
+  const { api, state } = fakeSidecar(live);
+  const result = await recoverInterruptedRuns(quietCtx(), api);
+  assert.equal(result.appended, 0, '那个 run 可能还在跑，绝不能写"被打断"');
+  assert.equal(result.skipped, 0);
+  assert.equal(result.ok, true);
+  assert.equal(state.clears, 0, '侧车必须保留');
+  assert.equal(state.cleared, false);
+  assert.equal((await readHistory({})).length, 0, 'history 里一条都不能多');
+});
+
+test('FIX-A2④：processStartedAt 不同（进程真的重启过）⇒ 每 target 一条 interrupted，且侧车被删', async () => {
+  await clearHistory();
+  const { api, state } = fakeSidecar(deadDescriptor());
+  const result = await recoverInterruptedRuns(quietCtx(), api);
+  assert.equal(result.ok, true);
+  assert.equal(result.appended, 2);
+  assert.equal(result.skipped, 0);
+  assert.equal(state.clears, 1);
+  assert.equal(state.cleared, true);
+
+  const all = await readHistory({});
+  assert.equal(all.length, 2);
+  for (const record of all) {
+    assert.equal(record.runId, 'r-dead');
+    assert.equal(record.error, INTERRUPTED_ERROR);
+    assert.equal(record.decision, 'unscorable');
+    assert.equal(record.validRounds, 0);
+    assert.equal(record.totalRounds, 2);
+    assert.equal(record.ts, '2026-11-03T00:40:00.000Z');
+  }
+  // 端到端：经真实 /history 路由读回（写盘 → 读回）
+  const capture = fakeCapture();
+  await routeHistory(undefined, capture.response);
+  const body = JSON.parse(capture.body());
+  assert.equal(body.records.length, 2);
+  assert.equal(body.records[0].error, INTERRUPTED_ERROR);
+  assert.equal(body.stats.error, null);
+});
+
+test('FIX-A2⑤：写历史失败 ⇒ lastHistoryError 非空（缺口 B 可见化），且 run 终态不变', async () => {
+  const before = historyState.lastHistoryError;
+  historyState.lastHistoryError = null;
+  try {
+    const run = fakeRun({ phase: 'done', finishedAt: Date.now() });
+    const snapshot = { phase: run.phase, finishedAt: run.finishedAt, error: run.error, results: run.results.length };
+    const result = await persistRunHistory(quietCtx(), run, async () => {
+      throw new Error('disk on fire');
+    });
+    assert.equal(result.ok, false);
+    assert.notEqual(historyState.lastHistoryError, null, '缺口 B：失败必须可见');
+    assert.equal(typeof historyState.lastHistoryError.at, 'string');
+    assert.match(historyState.lastHistoryError.message, /disk on fire/);
+    assert.deepEqual(
+      { phase: run.phase, finishedAt: run.finishedAt, error: run.error, results: run.results.length },
+      snapshot,
+      'run 终态字段一个都不能被改动',
+    );
+    // 一次失败必须留痕到进程结束：后续成功**不能**把它冲掉
+    await persistRunHistory(quietCtx(), run, async () => ({ ok: true }));
+    assert.notEqual(historyState.lastHistoryError, null, 'lastHistoryError 一旦设置就保留');
+    assert.match(historyState.lastHistoryError.message, /disk on fire/);
+    // 软失败（append 返回 ok:false）也要留痕
+    historyState.lastHistoryError = null;
+    await persistRunHistory(quietCtx(), run, async () => ({ ok: false, error: 'bad path' }));
+    assert.match(historyState.lastHistoryError.message, /bad path/);
+  } finally {
+    historyState.lastHistoryError = before;
+  }
+});
+
+test('FIX-A2⑥：/status 的 activeRun 与 sameProcess 两种值各一次；读侧车抛错仍是 200', async () => {
+  const live = deadDescriptor({
+    runId: 'r-live',
+    pid: process.pid,
+    processStartedAt: currentProcessStartedAt(),
+    targets: [{ provider: 'provider_a', model: 'm-a' }],
+  });
+  const c1 = fakeCapture();
+  await routeStatus(c1.response, { write: null, read: async () => live, clear: null });
+  assert.equal(c1.status(), 200);
+  const b1 = JSON.parse(c1.body());
+  assert.equal(b1.activeRun.sameProcess, true, '同进程 ⇒ true（宿主侧有一个任务在运行）');
+  assert.equal(b1.activeRun.runId, 'r-live');
+  assert.equal(b1.activeRun.startedAt, '2026-11-03T00:40:00.000Z');
+  assert.deepEqual(b1.activeRun.targets, [{ provider: 'provider_a', model: 'm-a' }]);
+  assert.deepEqual(b1.activeRun.options, live.options);
+
+  const c2 = fakeCapture();
+  await routeStatus(c2.response, { write: null, read: async () => ({ ...live, pid: 999999, processStartedAt: 1 }), clear: null });
+  const b2 = JSON.parse(c2.body());
+  assert.equal(b2.activeRun.sameProcess, false, '异进程 ⇒ false（上次未完成）');
+
+  const c3 = fakeCapture();
+  await routeStatus(c3.response, {
+    write: null,
+    read: async () => {
+      throw new Error('sidecar boom');
+    },
+    clear: null,
+  });
+  assert.equal(c3.status(), 200, '读侧车失败绝不能把 /status 变成非 200');
+  assert.equal(JSON.parse(c3.body()).activeRun, null);
+
+  const c4 = fakeCapture();
+  await routeStatus(c4.response, { write: null, read: null, clear: null });
+  assert.equal(c4.status(), 200);
+  assert.equal(JSON.parse(c4.body()).activeRun, null, '无侧车 ⇒ null');
+
+  const c5 = fakeCapture();
+  await routeStatus(c5.response);
+  const b5 = JSON.parse(c5.body());
+  assert.ok(Object.hasOwn(b5, 'activeRun'), '/status 必须带 activeRun 字段');
+  assert.ok(Object.hasOwn(b5, 'lastHistoryError'), '/status 必须带 lastHistoryError 字段');
+  assert.ok(Object.hasOwn(b5, 'activeRunId'), 'activeRunId 必须保留（P2 不回归）');
+});
+
+test('FIX-A2⑦：isSameProcess 的容差语义 —— ±1ms 抖动不能误判，真重启必须判出', () => {
+  assert.equal(PROCESS_STARTED_AT_TOLERANCE_MS, 1000);
+  const now = currentProcessStartedAt();
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now }), true);
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now + 1 }), true, '±1ms 抖动（实测存在）不得误判为"进程已重启"');
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now - 1 }), true);
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now - 60_000 }), false, '真正的进程重启必须判出');
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now + 60_000 }), false);
+  assert.equal(isSameProcess({ pid: process.pid + 1, processStartedAt: now }), false, 'pid 不同 ⇒ 不同进程');
+  assert.equal(isSameProcess({ processStartedAt: now }), true, 'pid 缺失时不否决（只按时间判）');
+  assert.equal(isSameProcess(null), false);
+  assert.equal(isSameProcess({}), false);
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: 'not-a-number' }), false);
+});
+
+test('FIX-A2⑧：侧车接口未落盘（W5 未合入）⇒ 只降级、不抛、不阻止启动', async () => {
+  const empty = { write: null, read: null, clear: null };
+  // sidecarApi：从一个没有这三个导出的模块取 ⇒ 三项皆 null
+  const api = sidecarApi({ appendRecords, readHistory });
+  assert.deepEqual(api, { write: null, read: null, clear: null });
+  // 写侧车：不抛，只记 lastHistoryError
+  const before = historyState.lastHistoryError;
+  historyState.lastHistoryError = null;
+  try {
+    const written = await writeRunSidecar(quietCtx(), fakeRun(), empty);
+    assert.equal(written.ok, false);
+    assert.match(historyState.lastHistoryError.message, /writeActiveRun/);
+    // 清侧车：未落盘时静默成功
+    const cleared = await clearRunSidecar(quietCtx(), empty);
+    assert.deepEqual(cleared, { ok: true, removed: false, error: null });
+    // 恢复：read 缺失 ⇒ ok:false 但**不抛**
+    const recovered = await recoverInterruptedRuns(quietCtx(), empty, async () => ({ ok: true }));
+    assert.equal(recovered.ok, false);
+    assert.match(recovered.error, /readActiveRun/);
+  } finally {
+    historyState.lastHistoryError = before;
+  }
+});
+
+test('FIX-A2⑩（追加1）：/history/models 每行带 lastError —— 与 lastTs 指向同一条记录，字段不省略', async () => {
+  // 情形 A：最新记录是"正常跑了但没聚出结果"（error=null）⇒ lastError 必须是 null（但字段仍在）
+  await clearHistory();
+  await appendRecords(
+    buildInterruptedRecords(deadDescriptor({ runId: 'r-old', startedAt: '2026-11-03T00:40:00.000Z', targets: [{ provider: 'provider_a', model: 'm-a' }] })),
+  );
+  await appendRecords(
+    buildHistoryRecords(
+      fakeRun({
+        runId: 'r-new',
+        finishedAt: Date.parse('2026-11-03T02:00:00.000Z'),
+        targets: [{ provider: 'provider_a', model: 'm-a' }],
+        results: [{ provider: 'provider_a', model: 'm-a', aggregate: null }],
+      }),
+    ),
+  );
+  const c1 = fakeCapture();
+  await routeHistoryModels(c1.response);
+  const b1 = JSON.parse(c1.body());
+  assert.equal(b1.models.length, 1);
+  assert.ok(Object.hasOwn(b1.models[0], 'lastError'), 'lastError 字段必须存在（不省略）');
+  assert.equal(b1.models[0].lastError, null, '最新记录 error=null ⇒ lastError=null');
+  assert.equal(b1.models[0].lastTs, '2026-11-03T02:00:00.000Z', 'lastTs 也指向最新那条 ⇒ 两者同源');
+  assert.equal(b1.models[0].runs, 2);
+
+  // 情形 B：最新记录是 interrupted ⇒ lastError 带来原文（聚合表才能区分"被打断"与"样本不足"）
+  await clearHistory();
+  await appendRecords(
+    buildHistoryRecords(
+      fakeRun({
+        runId: 'r-old2',
+        finishedAt: Date.parse('2026-11-03T03:00:00.000Z'),
+        targets: [{ provider: 'provider_a', model: 'm-a' }],
+        results: [{ provider: 'provider_a', model: 'm-a', aggregate: null }],
+      }),
+    ),
+  );
+  await appendRecords(
+    buildInterruptedRecords(deadDescriptor({ runId: 'r-new2', startedAt: '2026-11-03T04:00:00.000Z', targets: [{ provider: 'provider_a', model: 'm-a' }] })),
+  );
+  const c2 = fakeCapture();
+  await routeHistoryModels(c2.response);
+  const b2 = JSON.parse(c2.body());
+  assert.equal(b2.models[0].lastError, INTERRUPTED_ERROR);
+  assert.match(b2.models[0].lastError, /^interrupted: /);
+  assert.equal(b2.models[0].lastTs, '2026-11-03T04:00:00.000Z');
+  assert.equal(b2.models[0].lastDecision, 'unscorable');
+
+  // 情形 C：注入 reader 抛错 ⇒ 仍然 200，且 lastError 退化为 null（不抛、不崩）
+  const c3 = fakeCapture();
+  await routeHistoryModels(
+    c3.response,
+    async () => {
+      throw new Error('read boom');
+    },
+    async () => [{ provider: 'provider_a', model: 'm-a', lastTs: 'x', runs: 1, lastDecision: 'unscorable' }],
+  );
+  assert.equal(c3.status(), 200);
+  const b3 = JSON.parse(c3.body());
+  assert.equal(b3.models[0].lastError, null);
+  assert.ok(Object.hasOwn(b3.models[0], 'lastError'), '退化为 null 时字段同样不能省略');
+
+  // 情形 D：多个模型，只有其中一个最新记录带 error ⇒ 只污染那一行
+  await clearHistory();
+  await appendRecords(
+    buildInterruptedRecords({
+      ...deadDescriptor({ runId: 'r-x', startedAt: '2026-11-03T05:00:00.000Z' }),
+      targets: [{ provider: 'provider_a', model: 'm-a' }],
+    }),
+  );
+  await appendRecords(
+    buildHistoryRecords(
+      fakeRun({
+        runId: 'r-y',
+        finishedAt: Date.parse('2026-11-03T06:00:00.000Z'),
+        targets: [{ provider: 'provider_b', model: 'm-b' }],
+        results: [{ provider: 'provider_b', model: 'm-b', aggregate: null }],
+      }),
+    ),
+  );
+  const c4 = fakeCapture();
+  await routeHistoryModels(c4.response);
+  const b4 = JSON.parse(c4.body());
+  assert.equal(b4.models.length, 2);
+  const rowA = b4.models.find((row) => row.model === 'm-a');
+  const rowB = b4.models.find((row) => row.model === 'm-b');
+  assert.equal(rowA.lastError, INTERRUPTED_ERROR, 'm-a 的最新记录是 interrupted');
+  assert.equal(rowB.lastError, null, 'm-b 的最新记录是正常记录 ⇒ null（不得串味）');
+  await clearHistory();
+});
+
+test('FIX-A2⑪（追加2/3）：sameProcess 是"当下重算"的真实比较；无侧车时 activeRun 显式为 null', async () => {
+  const now = currentProcessStartedAt();
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now }), true, '取值一：同进程 ⇒ true');
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now - 5_000 }), false, '取值二：旧进程 ⇒ false');
+  // 同一对象挪走 processStartedAt ⇒ 立刻翻转（证明依赖输入，不是常量）
+  const live = { pid: process.pid, processStartedAt: now };
+  assert.equal(isSameProcess(live), true);
+  live.processStartedAt = now - 5_000;
+  assert.equal(isSameProcess(live), false);
+  // 明显的未来/过去时刻 ⇒ false（证明不是恒 true 的常量）
+  // ⚠️ 不能用 `Date.now()` 当 start：进程运行不足容差(1s)时它**本来就该**判 true —— 那不是常量，是容差的定义。
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now + 5_000 }), false);
+  assert.equal(isSameProcess({ pid: process.pid, processStartedAt: now - 3_600_000 }), false);
+
+  // 三态：字段存在且为 null ⇒ 宿主"明说"没有（客户端据此不显示横幅）
+  const c1 = fakeCapture();
+  await routeStatus(c1.response, { write: null, read: async () => null, clear: null });
+  assert.equal(c1.status(), 200);
+  const b1 = JSON.parse(c1.body());
+  assert.ok(Object.hasOwn(b1, 'activeRun'), 'activeRun 字段必须存在（不省略）');
+  assert.equal(b1.activeRun, null, '无侧车 ⇒ 显式 null');
+
+  // 有侧车 ⇒ 形状完整（含 processStartedAt / currentProcessStartedAt / pid）
+  const c2 = fakeCapture();
+  await routeStatus(c2.response, {
+    write: null,
+    clear: null,
+    read: async () => ({
+      v: 1,
+      runId: 'r-live',
+      startedAt: '2026-11-03T07:00:00.000Z',
+      pid: process.pid,
+      processStartedAt: now,
+      options: { rounds: 1, count: 1, parallel: 1, strict: false },
+      targets: [{ provider: 'provider_a', model: 'm-a' }],
+    }),
+  });
+  const b2 = JSON.parse(c2.body());
+  assert.equal(b2.activeRun.sameProcess, true);
+  assert.equal(b2.activeRun.processStartedAt, now, '侧车的 processStartedAt 必须能读到');
+  assert.equal(typeof b2.activeRun.currentProcessStartedAt, 'number', '当下值也必须能读到');
+  assert.equal(b2.activeRun.pid, process.pid);
+  assert.equal(b2.lastHistoryError === null || typeof b2.lastHistoryError === 'object', true, 'lastHistoryError 只能是 null 或对象');
+});
+
+test('FIX-A2⑫（顺带）：interrupted 记录的 ts 取自 descriptor.startedAt（不是重启时刻）', async () => {
+  await clearHistory();
+  const descriptor = deadDescriptor({ runId: 'r-ts', startedAt: '2026-11-03T08:00:00.000Z' });
+  const { api } = fakeSidecar(descriptor);
+  await recoverInterruptedRuns(quietCtx(), api);
+  const all = await readHistory({});
+  assert.equal(all.length, 2);
+  for (const record of all) {
+    assert.equal(record.ts, '2026-11-03T08:00:00.000Z', 'ts 必须是那次 run 的启动时刻，而不是"恢复发生的时刻"');
+    assert.equal(Number.isNaN(Date.parse(record.ts)), false);
+  }
+  // 非法 startedAt ⇒ 退化为当前时刻（不抛、不留非法 ts）
+  const dirty = buildInterruptedRecords(deadDescriptor({ startedAt: 'not-a-date' }));
+  assert.equal(Number.isNaN(Date.parse(dirty[0].ts)), false, 'ts 必须始终是可解析的 ISO');
+  await clearHistory();
+});
+
+test('FIX-A2⑨：侧车写/清与恢复的失败路径都只留痕、不抛', async () => {
+  const before = historyState.lastHistoryError;
+  historyState.lastHistoryError = null;
+  try {
+    // 写侧车抛错
+    const boom = await writeRunSidecar(quietCtx(), fakeRun(), {
+      write: async () => {
+        throw new Error('write boom');
+      },
+      read: null,
+      clear: null,
+    });
+    assert.equal(boom.ok, false);
+    assert.match(historyState.lastHistoryError.message, /write boom/);
+    // 写侧车返回 ok:false
+    await writeRunSidecar(quietCtx(), fakeRun(), { write: async () => ({ ok: false, error: 'ro fs' }), read: null, clear: null });
+    assert.match(historyState.lastHistoryError.message, /ro fs/);
+    // 清侧车返回 ok:false
+    const cleared = await clearRunSidecar(quietCtx(), { write: null, read: null, clear: async () => ({ ok: false, error: 'unlink failed' }) });
+    assert.equal(cleared.ok, false);
+    assert.match(historyState.lastHistoryError.message, /unlink failed/);
+    // 恢复过程整体抛错 ⇒ 不抛出去
+    const recovered = await recoverInterruptedRuns(
+      quietCtx(),
+      {
+        write: null,
+        read: async () => {
+          throw new Error('read boom');
+        },
+        clear: null,
+      },
+      async () => ({ ok: true }),
+    );
+    assert.equal(recovered.ok, false);
+    assert.match(recovered.error, /read boom/);
+
+    // ⚠️ 写中断记录失败 ⇒ **不清侧车**（有意偏离字面 spec：留给下次初始化重试，否则记录永久消失）
+    await clearHistory();
+    const { api, state } = fakeSidecar(deadDescriptor());
+    const failed = await recoverInterruptedRuns(quietCtx(), api, async () => ({ ok: false, error: 'append failed' }));
+    assert.equal(failed.ok, false);
+    assert.equal(failed.appended, 0);
+    assert.match(failed.error, /append failed/);
+    assert.equal(state.clears, 0, '写失败时绝不能清侧车（否则记录永久消失）');
+    assert.equal((await readHistory({})).length, 0);
+  } finally {
+    historyState.lastHistoryError = before;
+    await clearHistory();
+  }
 });

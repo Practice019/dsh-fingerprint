@@ -2,7 +2,7 @@
 
 DSH Web UI 左侧栏的「**指纹检测**」面板：勾选你已配置的模型 → 设轮次 → 跑 LM Fingerpoint Detection（`lmfpd-sdk`）→ 得到模型排名表。
 
-**状态**：`tests: 137 passing` · `selfcheck: 29 checks` · `license: MIT` · 包版本 `0.1.0`
+**状态**：`tests: 157 passing` · `selfcheck: 29 checks` · `license: MIT` · 包版本 `0.1.0`
 
 ---
 
@@ -399,12 +399,12 @@ node tools/selfcheck.mjs --judge-matrix                                 # 打印
 ⇒ 代价：人肉 `grep` 找不到明文词条。**要确认词表内容请看契约 §49.1，不要以为它丢了。**
 
 **② 两个私有 provider 名的处理是"刻意的非对称"—— 不要"修正"成对称。**
-下面用 `provider-a` / `provider-b` 作**代称**（**代称不是真实名字**；真实词表见 `tools/selfcheck.mjs` 的词表定义，它以碎片形式存放）：
-- `provider-a`：**认**"引号里只有它自己"这种形态。
-- `provider-b`：**只认**键名上下文与 URL 查询这两类。
-原因：`provider-b` 单独出现在引号里、在测试代码中太常见（测试框架名、用例名），**认它会立刻误报并杀死这项检查** —— **误报比漏报更早杀死一项检查**。
+下面用 `provider_a` / `provider_b` 作**代称**（**代称不是真实名字**；真实词表见 `tools/selfcheck.mjs` 的词表定义，它以碎片形式存放）：
+- `provider_a`：**认**"引号里只有它自己"这种形态。
+- `provider_b`：**只认**键名上下文与 URL 查询这两类。
+原因：`provider_b` 单独出现在引号里、在测试代码中太常见（测试框架名、用例名），**认它会立刻误报并杀死这项检查** —— **误报比漏报更早杀死一项检查**。
 
-> 📌 这段文字最初刻意用**粗体**而不是反引号，就是为了避开 X7 —— **反引号包裹本身就是 X7 判定命中的形态之一**。换成 `provider-a` / `provider-b` 这类**代称**之后它们不在词表里，用反引号就没问题了。
+> 📌 这段文字最初刻意用**粗体**而不是反引号，就是为了避开 X7 —— **反引号包裹本身就是 X7 判定命中的形态之一**。换成 `provider_a` / `provider_b` 这类**代称**之后它们不在词表里，用反引号就没问题了。
 > 实测过：直接用真名 + 反引号会让这份 README **自己**触发 X7 —— `node tools/selfcheck.mjs` 从 `PASS 29 / FAIL 0` 变成 `PASS 28 / FAIL 1`，报"私有名（引号/反引号包裹）2 处"。**文档自己也得是干净的。**
 
 **C7 是发布语义**：本地开发时我们**刻意不声明** `engines.dsh`；发布则**必须声明**且覆盖运行时。判定过程会完整打印（判定对象、判定引擎、每个比较子是否通过）。
@@ -458,15 +458,16 @@ en.nav 键存在 ✔（只核对键存在性，不校验英文值）
 
 **`--self-test` 是什么**：把合成输入喂给与真实检查**同一份**判定函数，断言每一项在"应红"的夹具上真的红、在基准夹具上真的绿。之所以需要它 —— 拿现成的第三方包做反例只能证明部分项能红（那个包在若干项上本来就合规），只有自造输入才能证明每一项都不是死代码。
 
-当前规模（**采样**）：三组共 **18 + 34 + 9 = 61 个夹具**、**126 + 115 + 21 = 262 个断言**（含证据断言与来源标签断言）：
+当前规模（**采样**，采集时刻见 §22.1）：四组共 **18 + 34 + 9 + 19 = 80 个夹具**、**126 + 115 + 21 + 44 = 306 个断言**：
 
 | 组 | 夹具 | 项 | 断言 |
 |---|---|---|---|
 | 槽位语义 S1–S7 | 18 | 7 | 126 |
 | 发布清单 C7 / X5 / X6（含三级取值各红各绿、A vs B 边界、引擎接入） | 34 | 3 | 102 状态 + 13 证据 |
 | C7 判定对象的三级取值解析器 | 9 | 2 | 18 状态 + 3 来源标签 |
+| **私有标识 X7**（含排除集、公开名不误伤、漏法探针） | **19** | — | **44**（逐夹具按 `expect` 字段） |
 
-并逐项报告"可达 PASS / 可达 FAIL"，两项都必须为「是」。
+并逐项报告"可达 PASS / 可达 FAIL"（X7 组报"可判 FAIL / 可判 PASS 的夹具数"），均须 > 0。
 
 ---
 
@@ -487,7 +488,7 @@ node tools/selfcheck.mjs
 # ② 夹具自测：零依赖、不碰 profile，任何环境都能跑
 node tools/selfcheck.mjs --self-test
 
-# ③ 客户端运行时冒烟：20 场景 × 2 模式 = 40 次运行；零依赖、不碰 profile
+# ③ 客户端运行时冒烟：24 场景 × 2 模式 = 48 次运行；零依赖、不碰 profile
 node tools/client-smoke.mjs
 
 # ④ 单元/集成测试全量：需要先 npm install
@@ -499,9 +500,9 @@ node --test
 | 步骤 | 前置条件 | 通过条件 | 本轮实测（**采样，不是硬结论**） |
 |---|---|---|---|
 | ① | **插件已装进 profile**（干净克隆上 C8/R1 必然 FAIL） | **`FAIL 0`**（`SKIP` 若出现，说明有文件尚未就绪，交付前必须变成 `PASS`） | `PASS 29 / FAIL 0 / SKIP 0`，退出码 0 |
-| ② | **无**（零依赖、不碰 profile） | **`断言不符 0 处；不可达项 0 项`** | 262 断言，各项均可达 PASS 且可达 FAIL |
-| ③ | **无**（零依赖、不碰 profile） | **`FAIL 0`**（**注意：不是"PASS 数固定"**，见下） | `PASS 679 / SKIP 5 / FAIL 0`，退出码 0 |
-| ④ | **已 `npm install`** | **`ℹ fail 0`**（判定标准就是 fail 0，条数会随增测变化） | `ℹ tests 137 / pass 137 / fail 0` |
+| ② | **无**（零依赖、不碰 profile） | **`断言不符 0 处；不可达项 0 项`** | 306 断言（四组），各项均可达 PASS 且可达 FAIL |
+| ③ | **无**（零依赖、不碰 profile） | **`FAIL 0`**（**注意：不是"PASS 数固定"**，见下） | `PASS 837 / SKIP 5 / FAIL 0`，退出码 0 |
+| ④ | **已 `npm install`** | **`ℹ fail 0`**（判定标准就是 fail 0，条数会随增测变化） | `ℹ tests 157 / pass 157 / fail 0` |
 
 > ⚠️ **③ 的判定标准是 `FAIL 0`，不要写死 PASS 条数**。它有两种模式，`PASS` 数会随模式不同而变：
 > - `primitives-present`：**SKIP 必须为 0**；
@@ -537,7 +538,7 @@ Copy-Item $src (Join-Path $tmp 'gate.mjs')
 
 ⚠️ 副本放进 `%TEMP%` 后，脚本里的 `DEFAULT_CLIENT = resolve(HERE, '..', 'client.js')` 会指向错地方，所以**必须**用 `--client <真 client.js>` 运行。
 
-**先证明副本等价**：未注入的副本应当输出与原件**逐字一致**（`PASS 679 / SKIP 5 / FAIL 0`，exit 0）。不成立说明副本不忠实，后面所有结论都无效。
+**先证明副本等价**：未注入的副本应当输出与原件**逐字一致**（`PASS 837 / SKIP 5 / FAIL 0`，exit 0）。不成立说明副本不忠实，后面所有结论都无效。
 
 ### 手法 ①：让**守恒闸门**红
 
@@ -585,23 +586,24 @@ function checkP(...) { if (muteBudget.left > 0) { muteBudget.left -= 1; return; 
 - `下限 === 基线`（**零松弛**）⇒ 丢 1 条即被抓住 —— **灵敏，正确**；
 - `下限 <  基线`（**有松弛**）⇒ 丢 `基线 − 下限` 条以内都不会响 —— **静默削弱闸门，危险**。
 
-⇒ 所以"20 个下限全部精确等于基线"不是巧合，而是**这条标准的验收形态**。
+⇒ 所以"24 个下限全部精确等于基线"不是巧合，而是**这条标准的验收形态**。
 
 ### 一轮复核结果（采样，非硬结论）
 
-- **手法 ①** → exit 1，**穷举点名 20/20 场景**；全量那次 `PASS 699`（正常 679）、`FAIL 0`。守恒之外的另外两道闸门**未被触发**（说明注入只打中了守恒这一条）。
-- **手法 ②**（每场景少 1 条，全量一次跑完）→ exit 1，`PASS 639`（= 679 − 20×2）、`FAIL 0`；守恒闸门与 present-SKIP 闸门**均未触发**；**20/20 场景全部被下限抓住**，`- <场景>：present PASS n < 下限 m` 明细 20 行齐全。
+- **手法 ①** → exit 1，**穷举点名 24/24 场景**；全量那次 `PASS 861`（= 837 + 24）、`FAIL 0`。守恒之外的另外两道闸门**未被触发**（说明注入只打中了守恒这一条）。
+- **手法 ②**（每场景少 1 条，全量一次跑完）→ exit 1，`PASS 789`（= 837 − 24×2）、`FAIL 0`；守恒闸门与 present-SKIP 闸门**均未触发**；**24/24 场景全部被下限抓住**，`- <场景>：present PASS n < 下限 m` 明细 24 行齐全。
+- **对照**：未注入的副本与原件的 sha256 一致（逐字节相同）、输出逐字一致（`PASS 837 / SKIP 5 / FAIL 0`，exit 0）—— 证明上面两次实验的对照是干净的。
 
 <details>
-<summary>手法 ② 的 20 行逐场景对照（基线 present PASS / 下限 / 注入后）—— 展开</summary>
+<summary>手法 ② 的 24 行逐场景对照（基线 present PASS / 下限 / 注入后）—— 展开</summary>
 
-> 「基线」列以**当次 `client-smoke` 输出**为准；本表仅记录**采集时刻**下的值。断言增删后这些数字会变，请以实际输出为准。
+> 「基线」列以**当次 `client-smoke` 输出**为准；本表仅记录**采集时刻**下的值（本次采集：`PASS 837 / SKIP 5 / FAIL 0`）。断言增删后这些数字会变，请以实际输出为准。
 
 | 场景 | 基线 present PASS | 下限 | 注入后 | 被下限抓住 |
 |---|---|---|---|---|
 | attach | 17 | 17 | 16 | 是 |
 | idleNone | 15 | 15 | 14 | 是 |
-| statusLegacy | 15 | 15 | 14 | 是 |
+| statusLegacy | 17 | 17 | 16 | 是 |
 | busyWithRunId | 18 | 18 | 17 | 是 |
 | busyFallbackStatus | 18 | 18 | 17 | 是 |
 | busyHopeless | 16 | 16 | 15 | 是 |
@@ -618,12 +620,16 @@ function checkP(...) { if (muteBudget.left > 0) { muteBudget.left -= 1; return; 
 | historyUnready | 15 | 15 | 14 | 是 |
 | historyRealFixture | 22 | 22 | 21 | 是 |
 | historyCountScope | 16 | 16 | 15 | 是 |
+| historyInterrupted | 21 | 21 | 20 | 是 |
+| historyWriteFail | 18 | 18 | 17 | 是 |
+| hostActiveRunDead | 19 | 19 | 18 | 是 |
+| hostActiveRunAlive | 19 | 19 | 18 | 是 |
 | regress | 16 | 16 | 15 | 是 |
 
-**结论：20/20 全部被抓住；且全部 20 个下限都精确等于基线值 ⇒ 零松弛。**
+**结论：24/24 全部被抓住；且全部 24 个下限都精确等于基线值 ⇒ 零松弛。**
 这一点很重要 —— **下限写高只会误报（安全）；下限写低则会静默放过丢失的断言（危险）**。
 因此本节的结果同时是"下限没有被写低"的证据。
-（基线值会随断言增删而变：**新增断言后必须同步调高对应下限**；调低必须在回报里说明理由。）
+（基线值会随断言增删而变：**新增断言后必须同步调高对应下限**；调低必须在回报里说明理由。场景数也会变 —— 本表是采集时刻的快照，不是该文件的常数。）
 </details>
 
 ### 清理（双重确认后再删）
@@ -659,7 +665,7 @@ if ($abs.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase) -an
 | 静态装载自检 + 槽位/发布语义检查（四连 ① ②） | `tools/selfcheck.mjs` |
 | 客户端运行时冒烟（四连 ③；内含两道防虚高闸门） | `tools/client-smoke.mjs` |
 | 一次性真机驱动脚本（手动联调用） | `tools/live-probe.mjs` |
-| 单元 / 集成测试（7 份，`node --test` 全量 137 条） | `test/aggregate.test.mjs` · `test/detector.test.mjs` · `test/history.test.mjs` · `test/index.test.mjs` · `test/probe.test.mjs` · `test/send.test.mjs` · `test/targets.test.mjs` |
+| 单元 / 集成测试（7 份，`node --test` 全量 157 条） | `test/aggregate.test.mjs` · `test/detector.test.mjs` · `test/history.test.mjs` · `test/index.test.mjs` · `test/probe.test.mjs` · `test/send.test.mjs` · `test/targets.test.mjs` |
 | 设计文档 | `docs/DESIGN.md` |
 | 文档 | `README.md` |
 

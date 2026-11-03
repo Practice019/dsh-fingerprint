@@ -10,7 +10,7 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -21,6 +21,9 @@ import {
   clearHistory,
   historyStats,
   aggregateByModel,
+  writeActiveRun,
+  readActiveRun,
+  clearActiveRun,
 } from '../lib/history.js'
 
 // ── 夹具 ────────────────────────────────────────────────────────────────────
@@ -606,6 +609,271 @@ test('12) 坏路径定向检测：父级是文件 → historyStats().error 非�
     } finally {
       if (previous === undefined) delete process.env.DSH_FINGERPRINT_HISTORY
       else process.env.DSH_FINGERPRINT_HISTORY = previous
+    }
+  })
+})
+
+// ══ 运行中侧车（§55）════════════════════════════════════════════════════════
+
+/**
+ * 侧车测试的隔离夹具：用**独立**变量 `DSH_FINGERPRINT_ACTIVE_RUN` 指到临时目录。
+ * ⚠️ 刻意不复用 `withTemp`（那个设的是 `DSH_FINGERPRINT_HISTORY`）—— 侧车有自己的覆盖变量，
+ * 两者混用会让「隔离断言」失去意义（§55 硬要求 1 / 用例 20）。
+ */
+async function withTempSidecar(fn) {
+  counter += 1
+  const dir = join(tmpdir(), `dsh-fp-active-run-${String(process.pid)}-${String(counter)}-${String(Date.now())}`)
+  const file = join(dir, 'active-run.json')
+  const previous = process.env.DSH_FINGERPRINT_ACTIVE_RUN
+  process.env.DSH_FINGERPRINT_ACTIVE_RUN = file
+  try {
+    return await fn({ file, dir })
+  } finally {
+    if (previous === undefined) delete process.env.DSH_FINGERPRINT_ACTIVE_RUN
+    else process.env.DSH_FINGERPRINT_ACTIVE_RUN = previous
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/** §55 冻结形状的侧车描述符。 */
+function activeRunDescriptor(overrides = {}) {
+  return {
+    v: 1,
+    runId: 'r-3',
+    startedAt: '2026-11-03T00:10:02.315Z',
+    pid: 12345,
+    processStartedAt: 1762000000000,
+    options: { rounds: 3, count: 3, parallel: 3, strict: true },
+    targets: [{ provider: 'provider_a', model: 'example/text-image' }],
+    ...overrides,
+  }
+}
+
+// ── 13. 写入 → 逐字段读回 ─────────────────────────────────────────────────
+
+test('13) 侧车：写入后逐字段读回一致，且落盘可解析', async () => {
+  await withTempSidecar(async ({ file }) => {
+    const written = await writeActiveRun(activeRunDescriptor())
+    assert.equal(written.ok, true)
+    assert.equal(written.error, null)
+    assert.equal(written.path, file, 'path 必须反映当前生效的侧车路径')
+
+    const back = await readActiveRun()
+    assert.equal(back.v, 1)
+    assert.equal(back.runId, 'r-3')
+    assert.equal(back.startedAt, '2026-11-03T00:10:02.315Z')
+    assert.equal(back.pid, 12345)
+    assert.equal(back.processStartedAt, 1762000000000, '关键字段必须原样往返')
+    assert.deepEqual(back.options, { rounds: 3, count: 3, parallel: 3, strict: true })
+    assert.deepEqual(back.targets, [{ provider: 'provider_a', model: 'example/text-image' }])
+
+    // 键集合恰好 7 个（§55 冻结形状）
+    assert.deepEqual(Object.keys(back).sort(), [
+      'options',
+      'pid',
+      'processStartedAt',
+      'runId',
+      'startedAt',
+      'targets',
+      'v',
+    ])
+
+    // 盘上内容本身可被 JSON.parse
+    const rawOnDisk = await readFile(file, 'utf8')
+    assert.doesNotThrow(() => JSON.parse(rawOnDisk))
+  })
+})
+
+// ── 14. 未写入 → null ────────────────────────────────────────────────────
+
+test('14) 侧车：未写入时 readActiveRun() → null（不是错误）', async () => {
+  await withTempSidecar(async () => {
+    assert.equal(await readActiveRun(), null)
+    assert.equal(await readActiveRun(), null, '反复读仍为 null，不抛')
+  })
+})
+
+// ── 15. 损坏 JSON → null ────────────────────────────────────────────────
+
+test('15) 侧车：损坏 JSON → null，不抛（损坏必须当作「没有侧车」）', async () => {
+  await withTempSidecar(async ({ file, dir }) => {
+    await mkdir(dir, { recursive: true })
+
+    for (const body of ['{ 这不是 json', 'null', '"a string"', '[]', '']) {
+      await writeFile(file, body, 'utf8')
+      let result
+      await assert.doesNotReject(async () => {
+        result = await readActiveRun()
+      })
+      assert.equal(result, null, `损坏内容必须判为「没有侧车」：${JSON.stringify(body)}`)
+    }
+  })
+})
+
+// ── 16. 缺关键字段 → null ──────────────────────────────────────────────
+
+test('16) 侧车：缺 runId / processStartedAt → null；补齐后能读出', async () => {
+  await withTempSidecar(async ({ file, dir }) => {
+    await mkdir(dir, { recursive: true })
+
+    const bad = [
+      '{"v":1,"pid":1}', // 两个关键字段都缺
+      '{"runId":"r-3","pid":1}', // 缺 processStartedAt
+      '{"processStartedAt":1762000000000,"pid":1}', // 缺 runId
+      '{"runId":"","processStartedAt":1762000000000}', // runId 空串
+      '{"runId":"r-3","processStartedAt":"not-a-number"}', // 类型不对
+      '{"runId":"r-3","processStartedAt":null}', // 显式 null
+    ]
+    for (const body of bad) {
+      await writeFile(file, body, 'utf8')
+      assert.equal(await readActiveRun(), null, `应判为不可用：${body}`)
+    }
+
+    // 反向断言：补齐关键字段后必须能读出来
+    // ⇒ 证明上面的 null 是因为「缺关键字段」，而不是因为读路径坏了
+    await writeFile(file, '{"runId":"r-3","processStartedAt":1762000000000}', 'utf8')
+    const ok = await readActiveRun()
+    assert.notEqual(ok, null)
+    assert.equal(ok.runId, 'r-3')
+    assert.equal(ok.processStartedAt, 1762000000000)
+    assert.equal(ok.pid, null, '缺失的非关键字段落成 null')
+    assert.deepEqual(ok.targets, [], '缺失的 targets 落成空数组')
+  })
+})
+
+// ── 17. clearActiveRun 幂等 ────────────────────────────────────────────
+
+test('17) 侧车：clearActiveRun 删文件；重复调用仍 ok:true / removed:false', async () => {
+  await withTempSidecar(async ({ dir }) => {
+    await writeActiveRun(activeRunDescriptor())
+    assert.notEqual(await readActiveRun(), null)
+
+    const first = await clearActiveRun()
+    assert.equal(first.ok, true)
+    assert.equal(first.removed, true, '第一次确实删掉了文件')
+    assert.equal(first.error, null)
+    assert.equal(await readActiveRun(), null)
+
+    // 幂等：文件已不在 ⇒ 仍算成功，removed:false
+    const second = await clearActiveRun()
+    assert.equal(second.ok, true, '文件本就不存在也算成功')
+    assert.equal(second.removed, false)
+    assert.equal(second.error, null)
+
+    assert.deepEqual(await clearActiveRun(), { ok: true, removed: false, error: null })
+
+    // 文件确实不在了
+    await assert.rejects(async () => readFile(join(dir, 'active-run.json'), 'utf8'))
+  })
+})
+
+// ── 18. 原子性 ──────────────────────────────────────────────────────────
+
+test('18) 侧车：原子性 —— 写入后盘上必定是完整可解析的 JSON（无半截），且不残留 .tmp-', async () => {
+  await withTempSidecar(async ({ file }) => {
+    for (let i = 1; i <= 12; i += 1) {
+      const big = 'm'.repeat(i * 500)
+      const ok = await writeActiveRun(
+        activeRunDescriptor({
+          runId: `r-${String(i)}`,
+          targets: Array.from({ length: i * 3 }, (_, k) => ({ provider: `p-${String(k)}`, model: big })),
+        }),
+      )
+      assert.equal(ok.ok, true)
+
+      const raw = await readFile(file, 'utf8')
+      let parsed
+      assert.doesNotThrow(() => {
+        parsed = JSON.parse(raw)
+      }, `第 ${String(i)} 次写入后盘上不是合法 JSON（半截）`)
+      assert.equal(parsed.runId, `r-${String(i)}`)
+      assert.equal(parsed.targets.length, i * 3)
+    }
+
+    const leftovers = (await readdir(dirname(file))).filter((n) => n.includes('.tmp-'))
+    assert.deepEqual(leftovers, [], 'rename 完成后不应残留临时文件')
+  })
+})
+
+// ── 19. 永不抛 ──────────────────────────────────────────────────────────
+
+test('19) 侧车：永不抛 —— 父级是文件时三个函数都只返回 error / null', async () => {
+  await withTempSidecar(async ({ dir }) => {
+    const afile = join(dir, 'afile')
+    await mkdir(dir, { recursive: true })
+    await writeFile(afile, 'not a directory', 'utf8')
+    // 前提断言：夹具确实具备「父级是文件」的性质
+    assert.equal((await stat(afile)).isFile(), true)
+
+    const previous = process.env.DSH_FINGERPRINT_ACTIVE_RUN
+    process.env.DSH_FINGERPRINT_ACTIVE_RUN = join(afile, 'active-run.json')
+    try {
+      let w
+      await assert.doesNotReject(async () => {
+        w = await writeActiveRun(activeRunDescriptor())
+      })
+      assert.equal(w.ok, false)
+      assert.match(String(w.error), /写入运行中侧车失败/)
+
+      let r
+      await assert.doesNotReject(async () => {
+        r = await readActiveRun()
+      })
+      assert.equal(r, null, '路径不可读 ⇒ 当作没有侧车')
+
+      let c
+      await assert.doesNotReject(async () => {
+        c = await clearActiveRun()
+      })
+      // 平台差异：Windows 把「父级是文件」映射为 ENOENT（⇒ ok:true/removed:false，语义正确），
+      // 类 Unix 报 ENOTDIR（⇒ ok:false）。两者都属于「不抛且语义正确」，故只断言形状。
+      assert.equal(typeof c.ok, 'boolean', '必须返回合法形状而不是抛')
+      assert.equal(typeof c.removed, 'boolean')
+    } finally {
+      if (previous === undefined) delete process.env.DSH_FINGERPRINT_ACTIVE_RUN
+      else process.env.DSH_FINGERPRINT_ACTIVE_RUN = previous
+    }
+  })
+})
+
+// ── 20. 与 history 路径隔离 ─────────────────────────────────────────────
+
+test('20) 侧车与 history 隔离：写侧车不得在被覆盖的 history 目录里产生任何文件', async () => {
+  await withTempSidecar(async ({ file: sidecarFile }) => {
+    counter += 1
+    const historyDir = join(tmpdir(), `dsh-fp-iso-${String(process.pid)}-${String(counter)}-${String(Date.now())}`)
+    const historyFile = join(historyDir, 'history.jsonl')
+    const previousHistory = process.env.DSH_FINGERPRINT_HISTORY
+    process.env.DSH_FINGERPRINT_HISTORY = historyFile
+    try {
+      // 只写侧车
+      const w = await writeActiveRun(activeRunDescriptor())
+      assert.equal(w.ok, true)
+      assert.equal(w.path, sidecarFile, '侧车必须落在 ACTIVE_RUN 指定的位置')
+
+      // history 目录**根本不该被创建**
+      await assert.rejects(async () => stat(historyDir), '写侧车不得创建 history 目录')
+
+      // 反向：写 history 也不得碰侧车
+      await appendRecords([record({ runId: 'r-x' })])
+      const after = await readActiveRun()
+      assert.equal(after.runId, 'r-3', '写 history 不得影响侧车')
+
+      // 侧车目录里不得出现 history.jsonl
+      const names = await readdir(dirname(sidecarFile))
+      assert.equal(names.includes('history.jsonl'), false, '侧车目录里不得出现 history.jsonl')
+      assert.equal(names.includes('active-run.json'), true, '侧车文件本身应在')
+
+      // 反向：侧车目录里只有侧车相关文件
+      assert.deepEqual(
+        names.filter((n) => !n.startsWith('active-run.json')),
+        [],
+        `侧车目录出现了预期外的文件：${names.join(', ')}`,
+      )
+    } finally {
+      if (previousHistory === undefined) delete process.env.DSH_FINGERPRINT_HISTORY
+      else process.env.DSH_FINGERPRINT_HISTORY = previousHistory
+      await rm(historyDir, { recursive: true, force: true }).catch(() => {})
     }
   })
 })

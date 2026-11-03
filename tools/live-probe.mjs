@@ -8,7 +8,7 @@
  * 用法（DSH 桌面端在跑，端口默认 2418）：
  *   node tools/live-probe.mjs                      # status + targets + 自动挑一个可检测目标跑 1 轮
  *   node tools/live-probe.mjs --dry                # 只跑 status/targets，不发起模型调用
- *   node tools/live-probe.mjs --provider provider-a --model vendor-a/model-x   # 也可不给，自动挑一个
+ *   node tools/live-probe.mjs --provider provider_a --model example/text-image   # 也可不给，自动挑一个
  *   node tools/live-probe.mjs --rounds 1 --count 3 --timeout 240
  *   node tools/live-probe.mjs --security           # 只做访问控制自检（不开销模型）
  *

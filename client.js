@@ -358,6 +358,16 @@ window.__ModuleLoader__.load({
       decisionScored: "已评分",
       decisionPartial: "部分回合有效",
       decisionUnscorable: "无可评分回合",
+      // ── §55「被打断」与「历史写入失败」的措辞 ──────────────────────────
+      interrupted: "被打断（无结果）",
+      interruptedHint: "上一次运行没走完，因此没有结果 —— 不是这轮检测失败，也不是样本不够。",
+      hostRunDead: "检测到上次有一个任务未完成（宿主重启前启动，无结果）",
+      hostRunAlive: "宿主侧有一个任务在运行",
+      hostRunAt: "启动于 {at}",
+      hostRunTargets: "目标 {n} 个",
+      historyWriteFailed: "历史写入失败：{reason}",
+      historyWriteFailedHint:
+        "这次检测的结果可能没有存下来 —— 记录是在 run 结束时写入的，写入失败的那一次不会出现在下面的列表里。（失败时刻 {at}）",
       noRank: "无排名",
       colValidRounds: "有效回合",
       metricNote:
@@ -507,6 +517,15 @@ window.__ModuleLoader__.load({
       decisionScored: "scored",
       decisionPartial: "partial",
       decisionUnscorable: "unscorable",
+      interrupted: "Interrupted (no result)",
+      interruptedHint: "The previous run never finished, so there is no result — this is not a failed detection, and not too few samples.",
+      hostRunDead: "A previous run never finished (started before the host restarted; no result)",
+      hostRunAlive: "A run is active on the host",
+      hostRunAt: "started {at}",
+      hostRunTargets: "{n} targets",
+      historyWriteFailed: "Failed to write history: {reason}",
+      historyWriteFailedHint:
+        "This detection result may not have been saved — records are written when the run reaches a terminal state, so the failed write never shows up in the list below. (failed at {at})",
       noRank: "no ranking",
       colValidRounds: "Valid rounds",
       metricNote:
@@ -837,6 +856,58 @@ window.__ModuleLoader__.load({
      */
     function pickRunId(value) {
       return typeof value === "string" && value.length > 0 ? value : null;
+    }
+
+    /**
+     * `/status.activeRun`（契约 §55）。
+     * 返回三态：`null`（宿主明确说没有）/ `undefined`（**字段缺失或形状不可用** ⇒ 按"未知"处理）/
+     * `{ runId, startedAt, sameProcess, targets }`。
+     * 未知一律退回现有行为，绝不报错（旧宿主 / profile 未重组合）。
+     */
+    function pickActiveRun(value) {
+      if (value === null) return null;
+      if (value === undefined || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const runId = pickRunId(value.runId);
+      if (runId === null) return undefined; // 没有 runId 就既不能提示也不能判定 ⇒ 未知
+      return {
+        runId: runId,
+        startedAt: textOf(value.startedAt),
+        // 三态：true=同进程在跑 / false=宿主重启前的死 run / null=宿主没给 ⇒ 未知
+        sameProcess: typeof value.sameProcess === "boolean" ? value.sameProcess : null,
+        targets: Array.isArray(value.targets) ? value.targets.filter((item) => item !== null && item !== undefined) : [],
+      };
+    }
+
+    /**
+     * `/status.lastHistoryError`（契约 §55 缺口 B 的可见化）。
+     * 同样三态：`null`（没有失败）/ `undefined`（字段缺失 ⇒ 未知，不显示）/ `{ at, message }`。
+     */
+    function pickHistoryError(value) {
+      if (value === null) return null;
+      if (value === undefined || typeof value !== "object" || Array.isArray(value)) return undefined;
+      const message = textOf(value.message);
+      if (message.length === 0) return undefined;
+      return { at: textOf(value.at), message: message };
+    }
+
+    /**
+     * 记录级失败原因（§55）：历史明细记录用 `error`，聚合行用 `lastError`（W7 新增字段，
+     * 未提供时聚合行按原样显示，不误判）。
+     */
+    function recordError(row) {
+      if (row === null || row === undefined) return "";
+      const direct = textOf(row.error);
+      if (direct.length > 0) return direct;
+      return textOf(row.lastError);
+    }
+
+    /** 宿主事实是否相同（避免空闲轮询每 4 s 触发一次无意义重渲染）。 */
+    function sameHostFacts(a, b) {
+      try {
+        return JSON.stringify(a) === JSON.stringify(b);
+      } catch (err) {
+        return false;
+      }
     }
 
     /** 终态判定：只有这三个是终态，其余（含 idle / running）都算"还在跑"。 */
@@ -1539,6 +1610,12 @@ window.__ModuleLoader__.load({
       const [historyNotice, setHistoryNotice] = useState(null);
       /** 「清空历史」二次确认。 */
       const [confirmClear, setConfirmClear] = useState(false);
+      /**
+       * 宿主侧事实（契约 §55）：`/status.activeRun` 与 `/status.lastHistoryError`。
+       * 两者都可能**缺失**（旧宿主 / profile 未重组合）⇒ undefined 表示"未知"，
+       * 一律退回本功能上线前的行为，绝不报错。
+       */
+      const [hostFacts, setHostFacts] = useState({ activeRun: undefined, lastHistoryError: undefined });
 
       /**
        * 最近一次从宿主看到的 activeRunId（§28.3）。
@@ -1644,8 +1721,19 @@ window.__ModuleLoader__.load({
             ? statusResult.data.detector
             : null;
         // §28.3：/status 的 activeRunId 可能缺失（旧形状）⇒ 正向判定，缺失即 null（不报错）
-        const activeRunId = statusResult.ok ? pickRunId(statusResult.data.activeRunId) : null;
-        serverActiveRunIdRef.current = activeRunId;
+        const statusData = statusResult.ok ? statusResult.data : null;
+        const activeRunId = statusData === null ? null : pickRunId(statusData.activeRunId);
+        // §55：宿主侧事实（缺失即"未知"）；只在真的拿到 /status 时才覆盖，避免把已知信息抹成未知
+        const activeRun = statusData === null ? undefined : pickActiveRun(statusData.activeRun);
+        const lastHistoryError = statusData === null ? undefined : pickHistoryError(statusData.lastHistoryError);
+        if (statusData !== null) setHostFacts({ activeRun: activeRun, lastHistoryError: lastHistoryError });
+        /**
+         * §55：`sameProcess === false` 是**宿主重启前留下的死 run** —— 它没有结果、也没有可订阅的事件流，
+         * 所以**只提示、不接管**（接管会挂到一个不存在的流上，反而制造假"运行中"）。
+         * `sameProcess` 缺失（未知）时保持既有行为：照旧按 activeRunId 接管。
+         */
+        const deadRun = activeRun !== undefined && activeRun !== null && activeRun.sameProcess === false;
+        serverActiveRunIdRef.current = deadRun ? null : activeRunId;
         if (targetsResult.ok) {
           setTargets({
             status: "ready",
@@ -1690,7 +1778,16 @@ window.__ModuleLoader__.load({
         const tick = async () => {
           const result = await requestJson("/status");
           if (disposed || !result.ok) return; // 空闲轮询失败静默：不打扰用户、不写错误态
-          const active = pickRunId(result.data.activeRunId);
+          // §55：宿主事实也跟着刷新（死 run 提示会在它消失后自动收起）
+          const nextActiveRun = pickActiveRun(result.data.activeRun);
+          const nextHistoryError = pickHistoryError(result.data.lastHistoryError);
+          setHostFacts((prev) => {
+            const next = { activeRun: nextActiveRun, lastHistoryError: nextHistoryError };
+            return sameHostFacts(prev, next) ? prev : next;
+          });
+          // §55：死 run 只提示、不接管（同 loadTargets 的判定）
+          const dead = nextActiveRun !== undefined && nextActiveRun !== null && nextActiveRun.sameProcess === false;
+          const active = dead ? null : pickRunId(result.data.activeRunId);
           serverActiveRunIdRef.current = active;
           if (active !== null) attachRun(active, "attached");
         };
@@ -1921,6 +2018,17 @@ window.__ModuleLoader__.load({
        * 不依赖"用户是否刚点过开始" —— 这样刷新页面、被 BUSY 挡回、或空闲轮询接上的任务都看得见。
        */
       const running = runId !== null && runId !== "" && !isTerminalPhase(phase);
+      /**
+       * §55：宿主侧事实。三态语义：
+       *   host == null       宿主明确说没有
+       *   host == undefined  字段缺失（旧宿主）⇒ 未知 ⇒ 什么都不显示
+       *   sameProcess=false  宿主重启前留下的**死 run**：只提示、不接管
+       *   sameProcess=true   宿主侧确实在跑：与"运行中"横幅**合并**，不出现两条
+       */
+      const host = hostFacts.activeRun;
+      const hostRunDead = host !== undefined && host !== null && host.sameProcess === false;
+      const hostRunAlive = host !== undefined && host !== null && host.sameProcess !== false;
+      const hostIsCurrent = hostRunAlive && host !== null && runId !== null && host.runId === runId;
       /** 当前是否检测视图；历史视图下把检测区整体隐藏（DOM 保留，run 视图不中断）。 */
       const showDetect = tab !== "history";
 
@@ -2360,6 +2468,19 @@ window.__ModuleLoader__.load({
                   title: tt("colDecision"),
                   render: (row) => {
                     const decision = textOf(row.decision);
+                    const error = recordError(row);
+                    /**
+                     * §55：`error` 非空 ⇒ 这次 run 根本没走完，**不能**渲染成「样本不足 / 无可评分回合」——
+                     * 那会把"被打断"误报成"样本不够，再加几轮"，正是操作者报的那个误导。
+                     * 若该行确实有结果（scored / partial），把结果标签保留在前，信息不丢。
+                     */
+                    if (error.length > 0) {
+                      const prefix = decision === "scored" ? tt("decisionScored") : decision === "partial" ? tt("decisionPartial") : null;
+                      return jsx("span", {
+                        style: { color: COLOR.warn },
+                        children: prefix === null ? tt("interrupted") : prefix + " · " + tt("interrupted"),
+                      });
+                    }
                     const label =
                       decision === "scored" ? tt("decisionScored") : decision === "partial" ? tt("decisionPartial") : decision === "unscorable" ? tt("decisionUnscorable") : decision;
                     const color = decision === "scored" ? COLOR.ok : decision === "partial" ? COLOR.warn : COLOR.mute;
@@ -2384,7 +2505,26 @@ window.__ModuleLoader__.load({
                 {
                   key: "error",
                   title: tt("colError"),
-                  render: (row) => (textOf(row.error).length > 0 ? jsx("span", { style: { color: COLOR.bad }, children: textOf(row.error) }) : "—"),
+                  render: (row) => {
+                    const error = recordError(row);
+                    if (error.length === 0) return "—";
+                    /**
+                     * §55：原文**完整显示**（不截断、不吞掉）；只做换行处理，避免长句撑破表格。
+                     * 被打断用 warn 色（不是插件的错），其余错误才用红。
+                     */
+                    const decision = textOf(row.decision);
+                    const interrupted = decision === "unscorable" || decision.length === 0;
+                    return jsx("span", {
+                      style: {
+                        color: interrupted ? COLOR.warn : COLOR.bad,
+                        whiteSpace: "pre-wrap",
+                        wordBreak: "break-word",
+                        display: "inline-block",
+                        maxWidth: "420px",
+                      },
+                      children: error,
+                    });
+                  },
                 },
               ],
               rows: records.map((row, index) => ({ __key: String(index), ...row })),
@@ -2408,6 +2548,24 @@ window.__ModuleLoader__.load({
          */
         const fileTotal = stats === null || stats === undefined ? null : stats.count;
         const body = [];
+        /**
+         * §55 缺口 B 的可见化：宿主写历史失败（`/status.lastHistoryError`）。
+         * 措辞必须让操作者明白「这次检测的结果可能没存下来」，而不是一句干巴的技术报错；
+         * 字段缺失（旧宿主）⇒ 不显示、不报错。
+         */
+        const writeError = hostFacts.lastHistoryError;
+        if (writeError !== undefined && writeError !== null) {
+          body.push(
+            jsxs("div", {
+              key: "write-error",
+              style: S.noticeBad,
+              children: [
+                jsx("strong", { key: "t", children: tt("historyWriteFailed", { reason: writeError.message }) }),
+                jsx("p", { key: "h", style: { ...S.hint, color: COLOR.fg }, children: tt("historyWriteFailedHint", { at: formatWhen(writeError.at) }) }),
+              ],
+            }),
+          );
+        }
         // §29.6：stats.error 非空必须显式提示 —— 否则用户会把"读失败"看成"没有记录"
         if (statsError.length > 0) {
           body.push(jsx("div", { key: "stats-error", style: S.noticeBad, children: tt("historyLoadFailed", { reason: statsError }) }));
@@ -2473,6 +2631,14 @@ window.__ModuleLoader__.load({
                   key: "lastStability",
                   title: tt("colStability"),
                   render: (row) => {
+                    /**
+                     * §55：聚合行带 `lastError`（W7 新增）⇒ 最近那次 run 没走完，
+                     * 不能再显示「样本不足」——那是"再跑几轮就好"的错误暗示。
+                     * 字段缺失（旧宿主）⇒ 走下面的原有分支，行为不变。
+                     */
+                    if (recordError(row).length > 0) {
+                      return jsx("span", { style: { color: COLOR.warn }, children: tt("interrupted") });
+                    }
                     const stability = textOf(row.lastStability);
                     if (stability === "stable") return jsx("span", { style: { color: COLOR.ok }, children: tt("stabilityStable") });
                     if (stability === "unstable") return jsx("span", { style: { color: COLOR.warn }, children: tt("stabilityUnstable") });
@@ -2698,6 +2864,8 @@ window.__ModuleLoader__.load({
                         children:
                           feedState.feed.mode === "sse" ? tt("feedSse") : feedState.feed.mode === "poll" || feedState.feed.mode === "poll-error" ? tt("feedPoll") : tt("feedConnecting"),
                       }),
+                      // §55：宿主侧在跑同一条 run ⇒ 合并进这一条横幅（不再另起一条）
+                      hostIsCurrent ? jsx("span", { key: "host", style: S.chip, children: tt("hostRunAlive") }) : null,
                       jsx("span", {
                         key: "actions",
                         style: { marginLeft: "auto", display: "inline-flex", gap: "6px", flexWrap: "wrap" },
@@ -2705,6 +2873,52 @@ window.__ModuleLoader__.load({
                           jsx(Button, { key: "cancel", onClick: () => void cancelRun(), children: tt("cancel") }, "cancel"),
                           jsx(Button, { key: "export", onClick: () => void exportRun(), children: tt("exportJson") }, "export"),
                         ],
+                      }),
+                    ],
+                  }),
+                ],
+              })
+            : null,
+
+          // §55：宿主侧有一个"没跑完的 run"（宿主重启前启动 ⇒ 无结果）
+          hostRunDead
+            ? jsxs("div", {
+                key: "host-banner",
+                style: S.notice,
+                children: [
+                  jsxs("div", {
+                    key: "line",
+                    style: { display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center" },
+                    children: [
+                      jsx(Dot, { key: "dot", color: COLOR.warn }),
+                      jsx("strong", { key: "t", children: tt("hostRunDead") }),
+                      jsx("span", { key: "id", style: S.code, children: host.runId }),
+                      host.startedAt.length > 0 ? jsx("span", { key: "at", style: S.chip, children: tt("hostRunAt", { at: formatWhen(host.startedAt) }) }) : null,
+                      host.targets.length > 0 ? jsx("span", { key: "tg", style: S.chip, children: tt("hostRunTargets", { n: host.targets.length }) }) : null,
+                    ],
+                  }),
+                  jsx("p", { key: "hint", style: S.hint, children: tt("interruptedHint") }),
+                ],
+              })
+            : null,
+          // §55：宿主侧在跑、但界面还没接上（例如 phase 已本地终态）⇒ 单条提示；此时没有"运行中"横幅，不重复
+          !running && hostRunAlive
+            ? jsxs("div", {
+                key: "host-alive-banner",
+                style: S.notice,
+                children: [
+                  jsxs("div", {
+                    key: "line",
+                    style: { display: "flex", flexWrap: "wrap", gap: "8px", alignItems: "center" },
+                    children: [
+                      jsx(Dot, { key: "dot", color: COLOR.accent }),
+                      jsx("strong", { key: "t", children: tt("hostRunAlive") }),
+                      jsx("span", { key: "id", style: S.code, children: host.runId }),
+                      host.startedAt.length > 0 ? jsx("span", { key: "at", style: S.chip, children: tt("hostRunAt", { at: formatWhen(host.startedAt) }) }) : null,
+                      jsx("span", {
+                        key: "actions",
+                        style: { marginLeft: "auto", display: "inline-flex", gap: "6px", flexWrap: "wrap" },
+                        children: jsx(Button, { key: "attach", onClick: () => attachRun(host.runId, "attached"), children: tt("retry") }, "attach"),
                       }),
                     ],
                   }),

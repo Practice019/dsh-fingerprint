@@ -45,6 +45,10 @@ const SCENARIOS = [
   'historyUnready',
   'historyRealFixture',
   'historyCountScope',
+  'historyInterrupted',
+  'historyWriteFail',
+  'hostActiveRunDead',
+  'hostActiveRunAlive',
   'regress',
 ];
 
@@ -66,7 +70,7 @@ const MODEL_KEY = 'provider_a\u0000' + MODEL;
 const ASSERTION_FLOOR = {
   attach: 17,
   idleNone: 15,
-  statusLegacy: 15,
+  statusLegacy: 17,
   busyWithRunId: 18,
   busyFallbackStatus: 18,
   busyHopeless: 16,
@@ -83,6 +87,10 @@ const ASSERTION_FLOOR = {
   historyUnready: 15,
   historyRealFixture: 22,
   historyCountScope: 16,
+  historyInterrupted: 21,
+  historyWriteFail: 18,
+  hostActiveRunDead: 19,
+  hostActiveRunAlive: 19,
   regress: 16,
 };
 
@@ -587,6 +595,20 @@ async function runScenario(scenario, mode, src) {
   };
   const realModelRow = { provider: 'provider_a', model: 'acme/text-large', lastTs: realRecord.ts, runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive' };
 
+  // ── §55 夹具：被打断的记录 / 宿主侧事实 ──────────────────────────────────
+  /** 被打断（run 级 error 非空 + decision unscorable）——**不得**渲染成「样本不足」。 */
+  const INTERRUPTED_ERROR = 'interrupted: 上一次运行未完成（宿主进程已重启，无结果）';
+  const interruptedModelRow = { provider: 'provider_a', model: 'acme/text-large', lastTs: '2026-11-03T00:10:02.315Z', runs: 1, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive', lastError: INTERRUPTED_ERROR };
+  /** 真的样本不足（error 为空）——原有分支**不得被误伤**。 */
+  const insufficientModelRow = { provider: 'provider_a', model: MODEL, lastTs: '2026-11-02T06:30:00.000Z', runs: 3, lastDecision: 'unscorable', lastPrediction: null, lastPredictionName: null, lastProbability: null, lastStability: 'inconclusive', lastError: null };
+  const interruptedRecord = { v: 1, ts: '2026-11-03T00:10:02.315Z', runId: 'r-1', provider: 'provider_a', model: 'acme/text-large', decision: 'unscorable', prediction: null, predictionName: null, family: null, familyName: null, probability: null, agreement: null, stability: 'inconclusive', validRounds: 0, totalRounds: 3, options: { rounds: 3, count: 3, parallel: 3, strict: true }, error: INTERRUPTED_ERROR };
+  const deadRun = { runId: 'r-dead', startedAt: '2026-11-03T00:10:02.315Z', sameProcess: false, options: { rounds: 3, count: 3, parallel: 3, strict: true }, targets: [{ provider: 'provider_a', model: 'acme/text-large' }] };
+  const liveRun = { runId: 'r-live', startedAt: '2026-11-03T00:20:00.000Z', sameProcess: true, options: { rounds: 3, count: 3, parallel: 3, strict: false }, targets: [{ provider: 'provider_a', model: MODEL }] };
+  const writeError = { at: '2026-11-03T00:12:44.001Z', message: 'EACCES: permission denied, open ...\\history.jsonl' };
+  const hostStatusDead = { ok: true, detector, activeRunId: 'r-dead', activeRun: deadRun, lastHistoryError: null };
+  const hostStatusAlive = { ok: true, detector, activeRunId: 'r-live', activeRun: liveRun, lastHistoryError: null };
+  const hostStatusWriteFail = { ok: true, detector, activeRunId: null, activeRun: null, lastHistoryError: writeError };
+
   // §32.4 空洞 fixture：rounds[] 里夹 null / undefined；perRound[] 里夹 null 且缺 index
   const exportHoles = {
     ok: true,
@@ -674,6 +696,21 @@ async function runScenario(scenario, mode, src) {
     historyRealFixture: { status: statusNull, runs: {}, history: { models: [realModelRow], stats: { count: 1, path: 'x', oldest: realRecord.ts, newest: realRecord.ts, skippedLines: 0, error: null }, records: [realRecord], removed: 0 } },
     // 父任务更正 2：stats.count 是文件总量，与过滤无关（?provider=nope → records=0 但 count=1）
     historyCountScope: { status: statusNull, runs: {}, history: { models: [realModelRow], stats: { count: 1, path: 'x', oldest: realRecord.ts, newest: realRecord.ts, skippedLines: 0, error: null }, records: [], removed: 0 }, filterQuery: 'nope' },
+    // §55：一条被打断（error 非空）+ 一条真样本不足（error 空），两条必须在同一屏里各自成立
+    historyInterrupted: {
+      status: statusNull,
+      runs: {},
+      history: {
+        models: [interruptedModelRow, insufficientModelRow],
+        stats: { count: 2, path: 'x', oldest: 'a', newest: 'b', skippedLines: 0, error: null },
+        records: [interruptedRecord],
+        removed: 0,
+      },
+      interruptedModel: 'acme/text-large',
+    },
+    historyWriteFail: { status: hostStatusWriteFail, runs: {}, history: { models: [realModelRow], stats: { count: 1, path: 'x', oldest: realRecord.ts, newest: realRecord.ts, skippedLines: 0, error: null }, records: [realRecord], removed: 0 } },
+    hostActiveRunDead: { status: hostStatusDead, runs: {} },
+    hostActiveRunAlive: { status: hostStatusAlive, runs: { 'r-live': Object.assign({}, runningSnapshot, { runId: 'r-live' }) } },
     regress: { status: statusNull, runs: {}, regression: true },
   };
   const spec = table[scenario];
@@ -812,6 +849,9 @@ async function runScenario(scenario, mode, src) {
   if (scenario === 'statusLegacy') {
     check('3) /status 缺 activeRunId → 不报错、未落 PageBoundary', text.includes('本页面渲染出错') === false && text.includes('宿主接口未就绪') === false);
     check('3) 无 SSE、无横幅', esCreated.length === 0 && text.includes('运行中') === false);
+    // §55 兼容：activeRun / lastHistoryError 一并缺失 ⇒ 按"未知"处理，什么都不显示、不报错
+    check('3) 缺 activeRun 字段 → 无宿主横幅', text.includes('检测到上次有一个任务未完成') === false && text.includes('宿主侧有一个任务在运行') === false);
+    check('3) 缺 lastHistoryError 字段 → 无写入失败提示条', text.includes('历史写入失败') === false);
   }
   if (scenario === 'busyWithRunId' || scenario === 'busyFallbackStatus') {
     const expectRun = scenario === 'busyWithRunId' ? 'r-7' : 'r-8';
@@ -1002,6 +1042,58 @@ async function runScenario(scenario, mode, src) {
   if (scenario === 'countsanity') {
     // 客户端筛选把一个已选中的模型过滤掉 ⇒ 分母若取"过滤后"就会显示 2 / 1
     check('D4 「已选 n / total」分母为全量可选行（2 / 3 而不是 2 / 1）', text.includes('已选 2 / 3') && text.includes('2 / 1') === false, text.split('\n').filter((l) => l.indexOf('已选') >= 0).join('|'));
+  }
+  if (scenario === 'historyInterrupted') {
+    switchTab(mounted.out, HISTORY_TAB_LABEL);
+    const after = await flush(panelComp);
+    const t2 = after.out.texts.join('\n');
+    // 聚合表：被打断行（lastError 非空）显示「被打断（无结果）」，真样本不足行保持原样
+    check('15) 聚合表：被打断行显示「被打断（无结果）」', t2.includes('被打断（无结果）'));
+    check('15) 聚合表：真样本不足行仍显示「样本不足，建议增加轮次」', t2.includes('样本不足，建议增加轮次'));
+    check('15) 「样本不足」只出现 1 次（被打断行不再误报样本不足）', t2.split('样本不足').length - 1 === 1, String(t2.split('样本不足').length - 1));
+    const detailButton = findButton(after.out, '展开明细');
+    check('15) 找到「展开明细」按钮', detailButton !== undefined);
+    if (detailButton !== undefined) {
+      detailButton.onClick();
+      const afterDetail = await flush(panelComp);
+      const t3 = afterDetail.out.texts.join('\n');
+      check('15) 明细：聚合行 + 明细行 = 恰好 2 处「被打断（无结果）」', t3.split('被打断（无结果）').length - 1 === 2, String(t3.split('被打断（无结果）').length - 1));
+      check('15) 明细：该行**不出现**「无可评分回合」', t3.includes('无可评分回合') === false);
+      check('15) 明细：失败原因列显示 error 原文（未被吞掉）', t3.includes('interrupted: 上一次运行未完成（宿主进程已重启，无结果）'));
+      check('15) 明细：仍无字面量 undefined', t3.indexOf('undefined') === -1);
+    }
+  }
+  if (scenario === 'historyWriteFail') {
+    check('16) 检测页无「历史写入失败」（提示属于历史页）', text.includes('历史写入失败') === false);
+    switchTab(mounted.out, HISTORY_TAB_LABEL);
+    const after = await flush(panelComp);
+    const t2 = after.out.texts.join('\n');
+    check('16) 历史页出现「历史写入失败：<message>」', t2.includes('历史写入失败：') && t2.includes('EACCES'));
+    check('16) 措辞说明"结果可能没存下来"', t2.includes('这次检测的结果可能没有存下来'));
+    check('16) 带上失败时刻', t2.includes('2026/11/3') || t2.includes(writeError.at));
+    check('16) 未白屏、未落 PageBoundary', t2.includes('本页面渲染出错') === false && after.out.elements > 50);
+  }
+  if (scenario === 'hostActiveRunDead') {
+    check('17) 出现「检测到上次有一个任务未完成」横幅', text.includes('检测到上次有一个任务未完成（宿主重启前启动，无结果）'));
+    check('17) 横幅带 runId', text.includes('r-dead'));
+    check('17) 横幅带启动时刻与目标数', text.includes('启动于') && text.includes('目标 1 个'));
+    check('17) 死 run **不接管**：不订阅任何 SSE', esCreated.length === 0, JSON.stringify(esCreated));
+    check('17) 不显示「运行中」横幅', text.includes('运行中') === false);
+    check('17) 未白屏、未落 PageBoundary', text.includes('本页面渲染出错') === false && mounted.out.elements > 50);
+  }
+  if (scenario === 'hostActiveRunAlive') {
+    // 「运行中」这三个字在别处也会出现（阶段标签、RUN_PHASE 文案）⇒ 按**横幅头**计数，
+    // 而不是数裸字符串，否则测不出"两条横幅"这件事。
+    const bannerHeads = mounted.out.hosts.filter((h) => h.type === 'strong' && String(h.props.children) === '运行中');
+    check('18) 「运行中」横幅头只出现 1 个（合并，不重复）', bannerHeads.length === 1, String(bannerHeads.length));
+    check(
+      '18) 没有第二条宿主横幅（宿主文案不是独立横幅头）',
+      mounted.out.hosts.filter((h) => h.type === 'strong' && String(h.props.children).includes('宿主侧有一个任务在运行')).length === 0,
+    );
+    check('18) 横幅内含「宿主侧有一个任务在运行」', text.includes('宿主侧有一个任务在运行'));
+    check('18) 接上 r-live（订阅 SSE）', esCreated.indexOf('/fingerprint/run/r-live/events') >= 0, JSON.stringify(esCreated));
+    check('18) 不出现「检测到上次有一个任务未完成」', text.includes('检测到上次有一个任务未完成') === false);
+    check('18) 未落 PageBoundary', text.includes('本页面渲染出错') === false);
   }
   if (scenario === 'regress') {
     check('R1) §14.5 input=null → 「输入: 未知」', text.includes('输入: 未知'));
